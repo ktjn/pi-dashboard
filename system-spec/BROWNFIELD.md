@@ -1,0 +1,161 @@
+# Brownfield: Onboarding Existing Systems
+
+Incremental sequencing for existing systems. Artifact rules: [constitution](CONSTITUTION.md). Load this document together with the constitution only.
+
+Overrides the [greenfield](GREENFIELD.md) ordering: existing code is the discovery input, so architecture may be described before capabilities, and implementation precedes verification.
+
+## Adoption Levels
+
+Each level targets a `--stage` ([`spec.md` § 11](spec.md#11-metamodel-validation)); known violations are allowed below `release` as risk waivers ([`spec.md` § 7](spec.md#7-risks)). Level 0 advances directly to Level 1 (`architecture`), skipping standalone `discovery` because existing code supplies architecture and contracts together. Validate with `metamodel.py <spec> --stage <stage>`.
+
+| Level | Goal | Stage |
+|---|---|---|
+| 0 — Inventory | `system`, `external_sources`, deployable units, coarse module boundaries (`status: draft`); identity and syntax only | `inventory` |
+| 1 — Dependency & data mapping | Observed `provides`/`requires`, data ownership, classification, lineage (`status: specified`); layer/cycle/ownership/budget violations recorded as waivers | `architecture` |
+| 2 — Behavioral pinning | As-is contracts and characterization tests (`Evidence`); missing verification categories covered by waivers; external contracts frozen before refactoring | `verification` |
+| 3 — Full conformance | All waivers remediated; layer and context budget rules enforced without exception; all 10 verification categories satisfied (`status: verified`) | `release` |
+
+For each adoption level, use the [shared decision record](CONSTITUTION.md#gate-decision-record): review observed artifacts against the level's criteria, record discrepancies and decide whether to pass, defer via an allowed waiver or rework.
+
+| Level | Bring to review | Decision required before proceeding |
+|---|---|---|
+| 0 — Inventory | Entrypoints, jobs, external sources, deployable units and candidate component boundaries | All active runtime units and external dependencies are registered; unknown boundaries are flagged for discovery |
+| 1 — Dependency & data mapping | Observed capability wiring, data schemas/owners/lineage, and discovered architecture violations with proposed waivers | Observed dependencies and data ownership match the running code; every violation is either remediated or deferred under a scoped, non-expired waiver |
+| 2 — Behavioral pinning | As-is contracts, characterization test results for external/cross-component behavior, compatibility baseline and remaining coverage waivers | External and cross-component behavior is pinned by passing characterization evidence; unverified categories have bounded waivers expiring by release |
+| 3 — Full conformance | Remediated architecture, compatibility results (`--compat`), requirement-linked evidence across all ten categories and risk dispositions | All waivers are closed, contracts and invariants hold without exception, and release evidence is current and reviewed |
+
+If a level review fails (for example, an unrecorded dependency, a characterization test that contradicts the drafted contract, or an expired waiver), keep the level open: correct the specification to match observed behavior or complete the remediation before advancing. Do not hide discrepancies by inventing idealized contracts during discovery.
+
+Worked progression from Level 0 to Level 3: [`examples/brownfield/`](examples/brownfield/README.md).
+
+Real onboarding feedback: [Modelable](archive/feedback/modelable-onboarding.md) records bounded adoption, existing authority/tool mapping, evidence revision binding and unresolved model gaps; it is not a full-conformance example. [Observable](archive/feedback/observable-onboarding.md) records complete brownfield onboarding across all 6 milestones to Level 3 release conformance, covering multi-schema database isolation, schema compatibility matrices, and automated evidence provenance. [Scalable](archive/feedback/scalable-onboarding.md) records a Rust re-onboarding with open gaps: layer vs domain grouping, sibling-layer ranks and per-test evidence scoping.
+
+## Convergence: from code-assisted discovery to specification-controlled development
+
+Brownfield onboarding is a knowledge-recovery track, not a mandate to preserve every observed implementation detail. Treat code, tests and operational observations as discovery evidence. Classify discovered behavior as required, forbidden, permitted, unknown or a proposed change; do not silently convert an accidental behavior into a required contract.
+
+For each bounded adoption scope, record a **specification authority decision** after behavioral characterization: which capabilities/contracts and requirements are accepted, which risks and verification obligations are covered, which assumptions hold, what remains unknown, and what source/observation revision supported discovery. This decision is separate from Level 3 full-conformance or release acceptance; partial scopes must not imply whole-system completeness.
+
+After that decision, further development of the accepted scope follows [FEATURE.md](FEATURE.md), and replacement implementations follow [REPLACEMENT.md](REPLACEMENT.md). To question the algorithm and technology choices and propose a next generation, use [MODERNIZATION.md](MODERNIZATION.md). The original source remains useful for diagnosing discrepancies but is no longer the normative definition of expected behavior. If a replacement exposes a missing requirement, reopen specification review before changing either implementation's acceptance criteria.
+
+## Progressive component isolation
+
+For projects adopting [component isolation](COMPONENT-ISOLATION.md), record which legacy components can execute alone, which dependencies still require real services, and which provided capabilities have programmable mocks. Create explicit seams and provider-owned mock contracts incrementally per accepted adoption slice. Characterize observed behavior before simulating it; preserve unverified cases as discovery/verification gaps. Do not claim isolation merely because a fake file exists or source dependencies form a DAG.
+
+## Reverse Discovery
+
+Start with the [intake and gate template](templates/BROWNFIELD-INTAKE.md): record the repository root, exact source revision, adoption scope, existing authorities, product/validator tool map, validator/schema pin and native gates. Use separate whole-product and slice decisions; a slice pass does not advance excluded components. Record external/deferred/unknown boundaries explicitly; an unresolved required provider keeps architecture open. Imported schemas and capability catalogs are discovery inputs, not acceptance evidence.
+
+For local multi-step operations, record transitions, actual Python/Rust/etc. interfaces, confirmation/freshness checks, durable writes and recovery. Distinguish failed-before-commit from committed-with-cleanup-error. Keep transaction ownership intact when choosing context budgets. The template supplies the protocol review record without inventing a new transport or claiming executable state-machine verification.
+
+1. **Boundaries & entrypoints**: APIs, jobs, events, external sources → `system`, capability stubs, `external_sources`; platforms and third-party APIs the code calls → `external: true` components providing only the used capabilities.
+2. **Data & state**: schemas, migrations, ORM/DTO models (use [`modelable`](.github/skills/modelable/SKILL.md) `import` where helpful; existing `.mdl` files stay authoritative: compare, don't regenerate, see its § Brownfield) → `data_models`, owners, classification, lineage.
+3. **Components & dependencies**: cluster modules by transaction/consistency boundaries (as-is context map: [`ddd`](.github/skills/ddd/SKILL.md)) → `components`, layers, domains, wiring; dependencies carried at runtime rather than in code (e.g. cross-module writes through a transaction platform) → `via`. Record what layers and domains mean in this project and which architecture rules it adopts ([intake](templates/BROWNFIELD-INTAKE.md#layers-domains-and-architecture-rules)); see [Architecture rules](#architecture-rules).
+   - Derive candidate components from packages: `--check-drift --check-ownership` (with `--deps` from the build tool) lists packages owned by no or several components.
+   - Assign layers from the dependency graph's levels and the abstraction each package provides, then name them in the project's own terms; don't force a four-tier template onto an engine or a protocol stack. A fine-grained dependency order is a valid layering.
+   - Assign domains from cohesive vocabulary and change boundaries, business or technical; record the vocabulary in `Domain.terms`.
+   - Review `--report architecture`, `--report duplicates` and the drift output; record violations as risks or waivers rather than redrawing boundaries to hide them. When discovery spans several domains, the [domain subagent coordination methodology](DOMAIN-AGENTS.md) is required: assign an accountable domain agent per domain and a coordinator to reconcile cross-domain wiring.
+4. **Invariants & failures**: domain guards, error handlers, existing tests → capability contracts, `Requirement.criteria`, initial `Evidence` (use [`tla`](.github/skills/tla/SKILL.md) / [`alloy`](.github/skills/alloy/SKILL.md) for concurrency or relational invariants).
+5. **Formal verification assessment**: assess every internal component against the indicators (concurrency, distributed state, financial transactions, safety-critical logic, state machines, protocols; [constitution § Formal Verification](CONSTITUTION.md#formal-verification)) and record the outcome as `formal_assessment` (`applies`, `indicators`, `rationale` when it does not apply, `evidence` IDs). A component with distributed state and no formal evidence then differs from one judged not to need it: `--stage verification` lists components with no assessment (`formal_unassessed`) and applicable ones with no passing `model-check` or `proof` record (`formal_no_evidence`). Unassessed is not the same as not applicable. At release an applicable component needs that evidence or an accepted risk on it (`treatment: acceptance`, `residual_accepted: true`) named by `formal_assessment.risk` (`COMP-13`).
+6. **Gaps & risks**: missing verification categories, unverified mitigations, architecture violations → `risks` and `requirements` backlog.
+
+Rules:
+
+- Record observed behavior, not intended behavior; never invent contracts or fields.
+- Separate **as-is discrepancies** (bugs, coupling, undocumented side effects observed in code) from **target changes** (remediation or modernization requirements).
+- Validate with `metamodel.py` after each step and review the underlying code and test evidence before recording a level decision.
+- Unknown/provisional classification uses `classification: unknown` plus an active `classification_review` requirement and conservative handling policy. Resolve it before architecture; do not allow an implicit public classification.
+- Bind implementation evidence to contract versions and source revisions with `subject_bindings`/`subject_version`; preserve file hashes, execution conditions and explicit `skipped` checks. Run optional `--check-artifacts --root <repository>` for local source/schema/evidence integrity, `--check-drift --root <repository>` for Python import and JSON Schema field drift, then retain native semantic and acceptance gates.
+- Evidence paths are relative to that repository root, even when the specification lives in a nested directory. Use one provenance file with an optional `::selector`; declare additional logs and environment records separately in `artifacts`. Preserve the original schema, capture and decisions when migrating validator versions.
+- Attribute skips to the requirements they leave unverified. Separate passing records may cover genuinely independent, executed checks; a suite's passing count does not establish a skipped criterion. Check release diagnostics for binding errors without treating their absence as release acceptance.
+- When components share relational storage or streaming buses, enforce dedicated schema namespaces (one owner per `namespace` and `storage_role`, `DATA-07`), eliminate cross-schema foreign keys, and back idempotency guarantees with formal models (`TelemetryDelivery.tla`) and concrete deduplication mechanisms.
+- Require transitional boundary allowlists to monotonically ratchet downward to zero before Level 3 acceptance.
+
+## Architecture rules
+
+Which common architecture invariants the toolkit covers, and how. What can only be reviewed is marked so, so a passing validator isn't read as covering it.
+
+| Invariant | Covered by |
+|---|---|
+| Dependencies point one way | `COMP-05`, `COMP-06`, layer policy (`COMP-14`) |
+| One responsibility per layer | `Layer.description`, review |
+| Interfaces defined above, implemented below | Contract in the lowest layer, or ports (`Capability.defined_by`, `CAP-05`) |
+| A layer knows only what it needs | `Layer.forbids` with `--check-drift` |
+| A layer is replaceable | Capability contracts, `fakes` (`COMP-09`, `COMP-10`), `--check-isolation` |
+| No shared mutable state | `DATA-03`, distinct namespaces and storage roles (`DATA-07`), `--check-access` |
+| One owner per concept or piece of state | `DATA-03`, `derived_from` with its channel (`DATA-08`, `--report architecture`), `--report duplicates` |
+| One meaning per term | `Domain.terms`, `--report duplicates` |
+| Domains evolve independently | `COMPAT-*`, `--impact`, `--report architecture`, `--compat` architecture changes |
+| A domain is coherent | Hubs (`--report architecture`), glossary-term ownership (`--report duplicates`), review |
+| One authoritative home per rule | `REF-02`, `COMP-04`, duplicate rules (`--report duplicates`; rules in code are not seen), review |
+| Layers and domains are orthogonal | `layer` and `domain` per component ([`spec.md` § 2](spec.md#2-systems)) |
+| A shared layer stays domain-neutral | `Layer.domain_neutral` (`DOM-04`), hubs |
+| Domains depend on contracts, not implementations | Capabilities, `COMP-04`, `--check-drift` |
+| Communication is explicit | `requires`/`via`, `DOM-02`, copies with no channel (`DATA-08`), `--check-access` |
+| No bypass | `Layer.forbids`, layer policy (`COMP-14`), `--check-access` |
+
+- **Contract at the bottom** is the first choice for dependency inversion: put the interface or ABI (a WIT package, an ABI crate, a protocol-types package) in the lowest layer, so providers and consumers both depend downward and drift and `COMP-05` work unchanged. Ports owned by a higher layer (`defined_by`, `contract_paths`) are for code that can't be restructured.
+- **Layers as a dependency order**: 8–10 fine-grained layers are a valid layering; skipping is then normal, which is why `layer_policy` allows it by default. `--report architecture` still counts skips per component, so a bypassed layer shows.
+- **Shared kernel**: legitimate when stable and technical or vocabulary only (codecs, crypto, ABIs; owns no domain data, holds no domain's commands or rules); a smell when it holds several domains' rules or commands. Structurally both look alike (many domains require them), so read the hub listing of `--report architecture` (dependent domains, `none (technical kernel)` vs domain data) together with the terms used outside their domain in `--report duplicates`, decide, and record a tolerated hub as a decision (a risk, or the domain's `description`).
+
+## Keeping a bound spec current
+
+After any change to bound source:
+
+- Change the source and commit it; bindings describe a revision, never a dirty tree.
+- Rerun the gate (tests, `--check-report`); `--check-artifacts --root .` names each stale subject, its requirements and evidence.
+- `system-spec spec.yaml --bind [SUBJECT…] --revision HEAD --root . [--include GLOB…]` prints fresh `subject_bindings` (provider's tracked `source_paths` files, hashed); refreshed evidence digests follow as comments (a record's own `artifacts`, and a run's once, since records inherit from it) that you apply to the record or run by hand; it refuses when the files differ from the revision. Paste the output into the spec: only `subject_bindings` is spec content.
+- Update evidence `subject_revision` to the new revision, then rerun `--stage release` and `--check-artifacts`.
+- On refresh, rerun `--compat git:<last accepted revision>` (architecture changes as notes, or `--compat-architecture strict` in CI) and review `--report architecture`.
+
+## Waivers
+
+- Known violations (`layer-violation`, `domain-violation`, `dependency-cycle`, `shared-data-ownership`, `shared-storage`, `layer-policy`, `neutral-layer`, `hidden-channel`, `context-budget`, `verification-category`) are linked to a `Risk` (`waives`) with `treatment: mitigation` or `acceptance`.
+- Each waiver requires a remediation requirement in `mitigated_by` and an `expires` bound (ISO date `YYYY-MM-DD` or target stage).
+- Expired waivers fail validation at every stage; no waivers are allowed at `--stage release` (Level 3).
+
+## Models as a safety net for refactoring
+
+For a concurrent or stateful component, a model of today's behaviour fixes the invariants a risky refactoring has to keep. Use the [`tla`](.github/skills/tla/SKILL.md) or [`quint`](.github/skills/quint/SKILL.md) skill (the same applies to [`lean`](.github/skills/lean/SKILL.md)):
+
+1. **Model the as-is behaviour first**: from the observed contract and characterization tests (Level 1–2), with one named property per invariant; check it and record the `model-check` evidence on the requirements it verifies. Unexpected counterexamples are findings about the current system: reopen the baseline, don't tune the model to pass.
+2. **Model the refactored design** and check it against the same properties. To show it preserves everything the old design had, state a refinement: in TLA+ a refinement mapping from the new design's variables to the old one's (`INSTANCE Old WITH …`, checked as `Old!Spec` by TLC); in Quint, the same properties checked on the new module. A refinement that holds keeps every property of the old model; one that fails names the behaviour the refactoring changes.
+3. **Replay model traces against both implementations**: generate traces from the model (Quint `--out-itf`, TLC simulation with `-dump`) and run them against the old code, then the new. They act as characterization tests derived from the model, not written by hand. The old code must pass them before the refactoring starts, the new code after; a trace the old code fails is a model or baseline error to settle first.
+4. **Record the evidence**: the replays are `test` evidence bound to the same requirement as the `model-check` record; the new design's check and refinement are `model-check` evidence on the new model files. `model_only` in `--evidence-report` lists requirements that still lack the replay.
+5. **Let staleness do the tracking**: with `subject_bindings` on the component's source, a refactored file makes the bound evidence stale (`--check-artifacts` names the subject, requirements and evidence); `--impact-paths` on the changed files lists what to re-check. Rerun the replays and the model check, then refresh the digests (`--bind`, see [Keeping a bound spec current](#keeping-a-bound-spec-current)).
+
+Guidance only: the validator checks neither refinement nor traces. Evidence about the model and traces about the code are separate claims; record both.
+
+## Narrow the categories or waive them
+
+A category with no evidence blocks `--stage verification` (`REQ-01`). Two routes, with different consequences:
+
+| Situation | Route | Level reached |
+|---|---|---|
+| The system has no such obligation (a demo with no latency or throughput budget) | Narrow `system.verification_categories`; record the rationale as a `Risk` on the system with `treatment: acceptance`, `residual_accepted: true` and a `description` naming the omitted categories | Can pass `--stage release` |
+| The obligation exists but its evidence is missing | Keep all categories; waive with `waives: verification-category`, a remediation requirement in `mitigated_by` and an `expires` bound | Stays at `verification`: a waiver fails `--stage release` (`RISK-08`) until the evidence arrives and the waiver is removed |
+
+- Narrowing is a statement about the system, not a deferral: do not narrow to get past a gate while the obligation is real.
+- A reviewer accepting a narrowed list checks that each omitted category has a recorded rationale, the owner accepted the risk, and nothing in the spec states a matching obligation (a `non-functional` requirement, a quality attribute or a capability `failure_mode` in that category).
+- The validator lists the omitted categories on every run (`note:` line, `omitted_categories` with `--json`); it does not check the rationale, so review it.
+- Two similar systems should take the same route; record the choice in the intake notes.
+
+## Characterization, Migration and Acceptance Loop
+
+1. **Pin baseline (Levels 1–2)**: capture observed contracts and run characterization tests before changing internal structure. Record any deferred violations or coverage gaps as scoped waivers with remediation requirements.
+2. **Scope one migration step**: run `--impact <id>` against the pinned baseline to identify affected components, data models, requirements and evidence. Prepare a bounded [implementation handoff](CONSTITUTION.md#implementation-handoff) (`--context <component-id>`) containing the pinned contract, target remediation requirement, allowed boundary changes and characterization suite.
+3. **Refactor or extract**: implement the strangler or boundary change within the handoff scope. If hidden coupling or an undocumented failure mode surfaces, stop and reopen the Level 1 or Level 2 review to update the observed baseline first.
+4. **Verify compatibility and remediation**: check `--compat <pinned-baseline>` for capability and data contracts, rerun invalidated characterization and remediation tests, and update evidence revisions. If a waiver expires or a check fails, recover by completing the remediation or rolling back the step before proceeding.
+5. **Close waivers and accept (Level 3)**: remove remediated waivers once their mitigating requirements have passing, current evidence. Complete all ten verification categories and record the release decision ([`CONSTITUTION.md` § Acceptance](CONSTITUTION.md#acceptance)).
+
+## Prompts
+
+Ask for observed evidence and explicit discrepancy decisions. When serializing the reference format, validate against [`reference-implementation/schema.json`](reference-implementation/schema.json) (`metamodel.py --schema`) and [`spec.md` § 11](spec.md#11-metamodel-validation) invariants; prose findings and review records remain part of the process. Per step:
+
+- **1** (`REF-01`, `DATA-01`): "List entrypoints of `<repo>` as draft `capabilities`, `components` and `external_sources` (`REF-01`, `DATA-01`); record observed behavior only."
+- **2** (`DATA-01`–`DATA-04`): "Extract `data_models` from `<schemas>` with `owner`, `classification` and `derived_from` (`DATA-01`, `DATA-02`, `DATA-03`, `DATA-04`); do not invent fields."
+- **3** (`STAT-02`, `COMP-01`–`COMP-07`, `COMP-11`, `DOM-01`–`DOM-03`): "Cluster `<modules>` into `components` by consistency boundary and `domain`; list observed `provides`/`requires`, runtime-mediated `via`, `external` providers and violations (`STAT-02`, `COMP-01`, `COMP-02`, `COMP-03`, `COMP-04`, `COMP-05`, `COMP-06`, `COMP-07`, `COMP-11`, `DOM-01`, `DOM-02`, `DOM-03`)."
+- **4** (`STAT-01`, `CAP-01`–`CAP-04`): "Derive `preconditions`, `postconditions`, `invariants`, `failure_modes` and `interface` for `<capability>` from guards, handlers and tests (`STAT-01`, `CAP-01`, `CAP-02`, `CAP-03`, `CAP-04`)."
+- **5** (`REQ-01`, `REQ-07`, `RISK-01`–`RISK-08`): "List missing verification categories and architecture violations as `risks` (`waives`, `mitigated_by`, `expires`) and `requirements` (`REQ-01`, `REQ-07`, `RISK-01`, `RISK-02`, `RISK-03`, `RISK-04`, `RISK-08`)."
+- **Level & waiver review** (`EV-04`, `RISK-01`, `RISK-02`, `RISK-08`): "Compare these spec revisions against the observed code/tests and this level's criteria (`EV-04`, `RISK-01`, `RISK-02`, `RISK-08`). Separate observed behavior from intended fixes, verify waiver scope/expiry and record pass, defer or rework."
+- **Migration handoff** (`COMPAT-01`–`COMPAT-09`): "Refactor `<component>` within this bounded `--context` handoff while preserving the pinned contracts (`COMPAT-01`, `COMPAT-02`, `COMPAT-03`, `COMPAT-04`, `COMPAT-05`, `COMPAT-06`, `COMPAT-07`, `COMPAT-08`, `COMPAT-09`) and characterization tests. Report affected revisions, compatibility findings and any newly discovered facts, coupling or model gaps ([self-improvement](CONSTITUTION.md#self-improvement-and-model-feedback))."

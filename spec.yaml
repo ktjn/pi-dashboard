@@ -1,0 +1,192 @@
+# yaml-language-server: $schema=system-spec/reference-implementation/schema.json
+system:
+  id: pi-dashboard
+  version: "0.1"
+  status: specified
+  layers: [presentation, application, platform]
+  external_sources: [sl-transport-api, open-meteo, football-data-org, highlightly-api, google-calendar-api, github-releases]
+  quality_attributes: { frame_time: "sustained ~50fps target on Pi 5 + Touch Display 2", legibility: "readable across a room at a glance" }
+  verification_categories: [functional, semantic, contract, serialization, concurrency, performance, resilience, security, observability]
+  context_budget: { max_owns_data: 5 }
+
+capabilities:
+  - id: show-departures
+    version: "0.1"
+    status: specified
+    preconditions: [station_configured]
+    postconditions: [departures_rendered]
+    invariants: [elapsed_departures_removed]
+    failure_modes: [feed_unavailable, feed_stale]
+  - id: show-clock-weather
+    version: "0.1"
+    status: specified
+    preconditions: [location_configured]
+    postconditions: [clock_and_weather_rendered]
+    invariants: [clock_derived_from_local_system_time]
+    failure_modes: [weather_feed_unavailable]
+  - id: show-daylight
+    version: "0.1"
+    status: specified
+    preconditions: [coordinates_configured]
+    postconditions: [daylight_times_rendered]
+    invariants: [daylight_duration_equals_sunset_minus_sunrise]
+    failure_modes: [system_time_unavailable]
+  - id: show-standings
+    version: "0.1"
+    status: specified
+    preconditions: [competitions_configured]
+    postconditions: [standings_rendered]
+    invariants: [season_identified_during_offseason]
+    failure_modes: [provider_unavailable, provider_rate_limited]
+  - id: schedule-display-power
+    version: "0.1"
+    status: specified
+    preconditions: [display_windows_configured]
+    postconditions: [screen_power_matches_schedule]
+    invariants: [standby_overrides_screensaver]
+    failure_modes: [backlight_control_unavailable]
+  - id: deploy-release
+    version: "0.1"
+    status: specified
+    preconditions: [release_published]
+    postconditions: [bundle_activated]
+    invariants: [last_known_good_retained]
+    failure_modes: [health_check_failed, digest_mismatch]
+  - id: activate-screensaver
+    version: "0.1"
+    status: specified
+    preconditions: [calendar_rule_configured]
+    postconditions: [screensaver_active_during_match]
+    invariants: [standby_takes_priority_over_screensaver]
+    failure_modes: [calendar_api_unavailable]
+  - id: remote-screen-control
+    version: "0.1"
+    status: specified
+    preconditions: [bearer_token_configured]
+    postconditions: [override_applied, status_reported]
+    invariants: [override_expires_at_next_schedule_boundary]
+    failure_modes: [invalid_token, override_file_write_failed]
+    interface: { operation: POST /control, request: override-request, response: status-report, idempotent: true, auth: bearer-token, errors: { invalid_token: 401, override_file_write_failed: 500 } }
+
+components:
+  - id: dashboard-core
+    version: "0.1"
+    status: specified
+    layer: presentation
+    owner: homelab
+    provides: [show-departures, show-clock-weather, show-daylight, show-standings]
+    owns_data: [departure, weather-reading, daylight-window, standings-row-serie-a, standings-row-allsvenskan]
+    formal_assessment: { applies: false, rationale: "Pure rendering/data-presentation logic over single-threaded local state; no concurrency, distributed state, financial transactions, safety-critical or protocol concerns." }
+  - id: screensaver
+    version: "0.1"
+    status: specified
+    layer: application
+    owner: homelab
+    provides: [activate-screensaver]
+    owns_data: [calendar-event-cache]
+    formal_assessment: { applies: false, rationale: "Simple poll-and-match logic against a cached event list; no concurrency or safety-critical behavior." }
+  - id: display-power
+    version: "0.1"
+    status: specified
+    layer: platform
+    owner: homelab
+    provides: [schedule-display-power]
+    owns_data: [power-schedule-state]
+    formal_assessment: { applies: false, rationale: "Single scheduled reconciler reading one override file; the override/schedule race is covered by a concurrency-category requirement, not a formal model." }
+  - id: remote-control
+    version: "0.1"
+    status: specified
+    layer: application
+    owner: homelab
+    provides: [remote-screen-control]
+    owns_data: [override-request, status-report]
+    formal_assessment: { applies: false, rationale: "Single HTTP endpoint on a trusted LAN with a shared-secret token; no distributed-state or safety-critical behavior." }
+  - id: release-pipeline
+    version: "0.1"
+    status: specified
+    layer: platform
+    owner: homelab
+    provides: [deploy-release]
+    owns_data: [release-bundle]
+    formal_assessment: { applies: false, rationale: "Sequential download/verify/swap/rollback on one device; no concurrency or distributed-state between nodes." }
+
+data_models:
+  - id: departure
+    version: "0.1"
+    owner: dashboard-core
+    classification: internal
+    external_source: sl-transport-api
+    fields: { site_id: int, line: string, destination: string, countdown_min: int, walk_time_min: int, disruption: string }
+  - id: weather-reading
+    version: "0.1"
+    owner: dashboard-core
+    classification: internal
+    external_source: open-meteo
+    fields: { temp_c: float, precip_probability_pct: int, observed_at: datetime }
+  - id: daylight-window
+    version: "0.1"
+    owner: dashboard-core
+    classification: internal
+    fields: { date: date, civil_dawn: datetime, sunrise: datetime, sunset: datetime, civil_dusk: datetime }
+  - id: standings-row-serie-a
+    version: "0.1"
+    owner: dashboard-core
+    classification: internal
+    external_source: football-data-org
+    fields: { competition: string, season: string, position: int, team: string, played: int, goal_difference: int, points: int }
+  - id: standings-row-allsvenskan
+    version: "0.1"
+    owner: dashboard-core
+    classification: internal
+    external_source: highlightly-api
+    fields: { competition: string, season: string, position: int, team: string, played: int, goal_difference: int, points: int }
+  - id: calendar-event-cache
+    version: "0.1"
+    owner: screensaver
+    classification: confidential
+    external_source: google-calendar-api
+    fields: { event_id: string, title: string, start: datetime, end: datetime }
+  - id: power-schedule-state
+    version: "0.1"
+    owner: display-power
+    classification: internal
+    fields: { current_state: string, override_until: datetime }
+  - id: override-request
+    version: "0.1"
+    owner: remote-control
+    classification: internal
+    fields: { action: string }
+  - id: status-report
+    version: "0.1"
+    owner: remote-control
+    classification: internal
+    fields: { state: string, panel_freshness: string, uptime_s: int, version: string }
+  - id: release-bundle
+    version: "0.1"
+    owner: release-pipeline
+    classification: internal
+    external_source: github-releases
+    fields: { version: string, digest: string, status: string }
+
+requirements:
+  - { id: req-departures-func, version: "0.1", status: specified, category: functional, target: show-departures, criteria: [elapsed departures are removed from view, walking-time countdown reflects the configured walk time] }
+  - { id: req-clock-weather-func, version: "0.1", status: specified, category: functional, target: show-clock-weather, criteria: ["the clock advances through an hour boundary while the weather endpoint is offline", "the weather panel identifies the age of its last reading"] }
+  - { id: req-daylight-func, version: "0.1", status: specified, category: functional, target: show-daylight, criteria: ["daylight duration equals sunset minus sunrise for a fixed date", "all four daylight times update when crossing local midnight"] }
+  - { id: req-standings-func, version: "0.1", status: specified, category: functional, target: show-standings, criteria: ["both competitions are readable within one rotation", "rows follow the provider's ranking, including tied points"] }
+  - { id: req-deploy-func, version: "0.1", status: specified, category: functional, target: deploy-release, criteria: ["a release that fails to render its first frame rolls back and is skipped on the next update check"] }
+  - { id: req-screensaver-func, version: "0.1", status: specified, category: functional, target: activate-screensaver, criteria: ["a calendar event matching a configured rule activates the screensaver at its start and restores the dashboard at its end"] }
+  - { id: req-schedule-semantic, version: "0.1", status: specified, category: semantic, target: schedule-display-power, criteria: [standby takes priority over the screensaver whenever both would otherwise apply] }
+  - { id: req-remote-control-contract, version: "0.1", status: specified, category: contract, target: remote-screen-control, criteria: ["POST /control returns 401 for a missing or invalid bearer token", "POST /control returns 200 with the applied state on success", "GET /status returns current state, per-panel freshness, uptime and version"] }
+  - { id: req-board-toml-serialization, version: "0.1", status: specified, category: serialization, target: dashboard-core, criteria: ["board.toml parses into validated configuration, or the app refuses startup with a clear error"] }
+  - { id: req-override-concurrency, version: "0.1", status: specified, category: concurrency, target: schedule-display-power, criteria: ["a manual override write and the once-a-minute schedule reconciliation do not race: the reconciler always reads a consistent override state"] }
+  - { id: req-performance-framerate, version: "0.1", status: specified, category: performance, kind: non-functional, target: pi-dashboard, criteria: ["sustained frame time supports a legible countdown and clock UI on the Pi 5 + Touch Display 2 target hardware"] }
+  - { id: req-resilience-offline, version: "0.1", status: specified, category: resilience, kind: non-functional, target: dashboard-core, criteria: ["a cold boot without network shows the clock and last valid cached data per panel, marking unavailable feeds", "each panel recovers independently when connectivity returns, with no full-app restart"] }
+  - { id: req-resilience-backlight, version: "0.1", status: specified, category: resilience, kind: non-functional, target: schedule-display-power, criteria: ["the wlr-randr off/on invocation succeeds from the systemd-timer context with the graphical session's WAYLAND_DISPLAY and XDG_RUNTIME_DIR"] }
+  - { id: req-remote-control-security, version: "0.1", status: specified, category: security, kind: non-functional, target: remote-screen-control, criteria: ["the control endpoint rejects any request without a valid bearer token", "the token is provisioned outside the repository, never committed"] }
+  - { id: req-remote-control-observability, version: "0.1", status: specified, category: observability, kind: non-functional, target: remote-screen-control, criteria: ["status reports distinguish normal, scheduled-standby, manual-override and screensaver states", "status reports include per-panel data freshness, uptime and deployed version"] }
+
+risks:
+  - { id: risk-macroquad-wayland-fullscreen, target: dashboard-core, description: "Macroquad/GLFW fullscreen under Wayland is known to cap at ~30fps or panic on some miniquad backend configs; unconfirmed on this hardware.", treatment: mitigation, mitigated_by: [req-performance-framerate] }
+  - { id: risk-wlr-randr-env-fragility, target: schedule-display-power, description: "wlr-randr backlight control silently fails without the correct WAYLAND_DISPLAY/XDG_RUNTIME_DIR when invoked from a non-interactive systemd context.", treatment: mitigation, mitigated_by: [req-resilience-backlight] }
+  - { id: risk-highlightly-tos-unverified, target: show-standings, description: "Highlightly Football API's attribution/commercial-use terms were not independently verified before selecting it for the free Allsvenskan adapter.", treatment: acceptance, residual_accepted: true }
+  - { id: risk-scalability-not-applicable, target: pi-dashboard, description: "Single personal device, single viewer, no load-scaling obligation; scalability narrowed out of verification_categories for this reason.", treatment: acceptance, residual_accepted: true }
