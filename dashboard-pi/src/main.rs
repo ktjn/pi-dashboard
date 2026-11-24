@@ -9,6 +9,10 @@ use dashboard_core::render::{
     STATION_PANEL_HEIGHT, render_clock_weather_header, render_daylight_strip,
     render_departures_panel, render_standings_panel,
 };
+use dashboard_core::schedule::{
+    DisplayPowerControl, NullDisplayPowerControl, is_within_display_window, reconcile,
+    resolved_power,
+};
 use dashboard_core::standings::{
     HighlightlySeasonSource, StandingsBoard, StandingsFetchError, StandingsRotation, StandingsRow,
     StandingsSource, fetch_highlightly_standings, parse_football_data_standings_response,
@@ -36,6 +40,11 @@ const STANDINGS_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 /// Falls back to `board.toml`'s own default when no `[panel_rotation]` is
 /// configured at all.
 const STANDINGS_ROTATION_DEFAULT_INTERVAL_SECONDS: u32 = 15;
+/// Short enough for the real "once a minute" reconciliation (PI-05's own
+/// acceptance criterion - the systemd-timer side of that is explicitly out
+/// of scope for this slice) while staying cheap to poll continuously from a
+/// background thread.
+const DISPLAY_POWER_RECONCILE_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
 struct OpenMeteoWeatherSource {
     client: reqwest::blocking::Client,
@@ -380,6 +389,48 @@ fn spawn_standings_refresh_threads(board_config: &BoardConfig, board: Arc<Mutex<
     }
 }
 
+/// Reconciles display power on a background thread, off the render loop,
+/// same isolation the other `spawn_*_refresh_threads` give their feeds.
+/// `override_active`/`screensaver_active` have no real trigger yet (PI-08's
+/// override file, PI-07's calendar poll) - this loop already reads them as
+/// a fixed snapshot per tick and passes that single snapshot into
+/// `reconcile`, so wiring in the real sources later is a read at the top of
+/// this loop, not a reshape of the reconciliation call itself. Only calls
+/// `set_power` when the resolved power actually changes, to avoid spamming
+/// the (currently null) backlight backend every tick.
+fn spawn_display_power_reconciliation_thread(
+    board_config: &BoardConfig,
+    mut power_control: impl DisplayPowerControl + Send + 'static,
+) {
+    let time_zone = board_config.time_zone.clone();
+    let display_windows = board_config.display_windows.clone();
+    std::thread::spawn(move || {
+        let mut last_power: Option<bool> = None;
+        loop {
+            let now_utc = OffsetDateTime::now_utc();
+            let override_active = None;
+            let screensaver_active = false;
+
+            match is_within_display_window(&display_windows, &time_zone, now_utc) {
+                Ok(schedule_says_awake) => {
+                    let state = reconcile(schedule_says_awake, override_active, screensaver_active);
+                    let power_on = resolved_power(state);
+                    if last_power != Some(power_on) {
+                        if let Err(error) = power_control.set_power(power_on) {
+                            eprintln!("display power control failed: {error}");
+                        } else {
+                            last_power = Some(power_on);
+                        }
+                    }
+                }
+                Err(error) => eprintln!("display-window evaluation failed: {error}"),
+            }
+
+            std::thread::sleep(DISPLAY_POWER_RECONCILE_INTERVAL);
+        }
+    });
+}
+
 #[macroquad::main("pi-dashboard")]
 async fn main() {
     let board_config = match load_board_config(Path::new("board.toml")) {
@@ -389,6 +440,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    spawn_display_power_reconciliation_thread(&board_config, NullDisplayPowerControl::new());
 
     let weather_store = Arc::new(Mutex::new(WeatherSnapshotStore::new()));
     let weather_source = OpenMeteoWeatherSource::new(board_config.latitude, board_config.longitude);
