@@ -7,7 +7,10 @@ use dashboard_core::departures::{
 };
 use dashboard_core::render::{
     STATION_PANEL_HEIGHT, render_clock_weather_header, render_daylight_strip,
-    render_departures_panel,
+    render_departures_panel, render_standings_panel,
+};
+use dashboard_core::standings::{
+    FixtureStandingsSource, StandingsBoard, StandingsRotation, StandingsRow, StandingsSource,
 };
 use dashboard_core::weather::{
     FixtureWeatherSource, WeatherReading, WeatherSnapshotStore, WeatherSource,
@@ -23,6 +26,10 @@ const STOCKHOLM_TZ: &str = "Europe/Stockholm";
 
 const DUVBO_SITE_ID: u32 = 9324;
 const SUNDBYBERG_SITE_ID: u32 = 9325;
+
+const ALLSVENSKAN_ID: &str = "allsvenskan";
+const SERIE_A_ID: &str = "serie-a";
+const STANDINGS_ROTATION_INTERVAL_SECONDS: u32 = 15;
 
 /// How often the playground re-generates fixture departures relative to
 /// its own advancing clock (`now_utc`, not the frozen `base_utc`), so
@@ -111,6 +118,69 @@ fn refresh_fixture_weather(store: &mut WeatherSnapshotStore, now: time::OffsetDa
     }
 }
 
+fn fixture_allsvenskan_table() -> Vec<StandingsRow> {
+    vec![
+        StandingsRow {
+            competition: "Allsvenskan".to_string(),
+            season: "2026".to_string(),
+            position: 1,
+            team: "Malmö FF".to_string(),
+            played: 30,
+            goal_difference: 20,
+            points: 55,
+        },
+        StandingsRow {
+            competition: "Allsvenskan".to_string(),
+            season: "2026".to_string(),
+            position: 2,
+            team: "Djurgården".to_string(),
+            played: 30,
+            goal_difference: 17,
+            points: 55,
+        },
+    ]
+}
+
+fn fixture_serie_a_table() -> Vec<StandingsRow> {
+    vec![
+        StandingsRow {
+            competition: "Serie A".to_string(),
+            season: "2025/2026".to_string(),
+            position: 1,
+            team: "Internazionale".to_string(),
+            played: 13,
+            goal_difference: 18,
+            points: 32,
+        },
+        StandingsRow {
+            competition: "Serie A".to_string(),
+            season: "2025/2026".to_string(),
+            position: 2,
+            team: "Napoli".to_string(),
+            played: 13,
+            goal_difference: 13,
+            points: 30,
+        },
+    ]
+}
+
+/// Builds and drains the fixture standings sources for both configured
+/// competitions, recording a success snapshot for each into `board` -
+/// the same `StandingsSource`/`record_success` path a real provider
+/// client uses.
+fn refresh_fixture_standings(board: &mut StandingsBoard, now: time::OffsetDateTime) {
+    let mut responses = HashMap::new();
+    responses.insert(ALLSVENSKAN_ID.to_string(), Ok(fixture_allsvenskan_table()));
+    responses.insert(SERIE_A_ID.to_string(), Ok(fixture_serie_a_table()));
+    let mut source = FixtureStandingsSource::new(responses);
+
+    for competition_id in [ALLSVENSKAN_ID, SERIE_A_ID] {
+        if let Ok(rows) = source.fetch_standings(competition_id) {
+            board.record_success(competition_id, rows, now);
+        }
+    }
+}
+
 #[macroquad::main("pi-dashboard (playground)")]
 async fn main() {
     // Fixture data in place of a real provider - the playground never
@@ -125,6 +195,13 @@ async fn main() {
     let mut departures_board = DeparturesBoard::new();
     refresh_fixture_departures(&mut departures_board, base_utc);
     let mut last_departures_refresh = base_utc;
+
+    let mut standings_board = StandingsBoard::new();
+    refresh_fixture_standings(&mut standings_board, base_utc);
+    let standings_rotation = StandingsRotation::new(
+        vec![ALLSVENSKAN_ID.to_string(), SERIE_A_ID.to_string()],
+        STANDINGS_ROTATION_INTERVAL_SECONDS,
+    );
 
     let stations = [
         Station {
@@ -181,6 +258,10 @@ async fn main() {
             render_departures_panel(&departures_state, panel_top);
             panel_top += STATION_PANEL_HEIGHT;
         }
+
+        let active_competition_id = standings_rotation.active_competition(now_utc);
+        let standings_state = standings_board.competition_state(active_competition_id, now_utc);
+        render_standings_panel(active_competition_id, &standings_state, panel_top);
 
         macroquad::window::next_frame().await;
     }

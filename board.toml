@@ -21,6 +21,10 @@ direction = "stockholm"
 id = "allsvenskan"
 provider = "highlightly"
 competition_code = "ALLSV"
+# Placeholder pending live verification against Highlightly's
+# /leagues?leagueName=Allsvenskan&countryCode=SE lookup - no API key
+# available in this environment to confirm the real numeric id.
+highlightly_league_id = 113
 
 [[competitions]]
 id = "serie-a"

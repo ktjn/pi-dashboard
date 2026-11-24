@@ -1,0 +1,5 @@
+{
+  "competition": { "id": 2019, "name": "Serie A", "code": "SA" },
+  "season": { "id": 2411, "startDate": "2025-08-17", "endDate": "2026-05-24", "currentMatchday": 13 },
+  "standings": []
+}

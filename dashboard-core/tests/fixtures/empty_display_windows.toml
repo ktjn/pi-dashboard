@@ -14,3 +14,4 @@ direction = "stockholm"
 id = "allsvenskan"
 provider = "highlightly"
 competition_code = "ALLSV"
+highlightly_league_id = 113

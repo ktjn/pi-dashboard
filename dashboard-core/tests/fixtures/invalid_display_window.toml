@@ -14,6 +14,7 @@ direction = "stockholm"
 id = "allsvenskan"
 provider = "highlightly"
 competition_code = "ALLSV"
+highlightly_league_id = 113
 
 [[display_windows]]
 day_type = "weekday"

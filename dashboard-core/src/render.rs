@@ -1,6 +1,7 @@
 use crate::clock::LocalClock;
 use crate::daylight::DaylightWindow;
 use crate::departures::DeparturesPanelState;
+use crate::standings::StandingsPanelState;
 use crate::weather::WeatherPanelState;
 
 /// Text content for the clock + weather header, factored out of the
@@ -224,6 +225,106 @@ pub fn render_departures_panel(state: &DeparturesPanelState, top: f32) {
     }
 }
 
+/// One formatted line per standings row, factored out of the macroquad
+/// drawing calls for the same reason as the other panels. `header` carries
+/// the competition name and season (from the table itself when available,
+/// so it keeps identifying its season during the off-season), falling back
+/// to the configured competition id when no table has ever been fetched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StandingsPanelDisplay {
+    pub header: String,
+    pub lines: Vec<String>,
+    pub stale_note: Option<String>,
+}
+
+/// Caps how many standings rows a single panel draws, mirroring
+/// `MAX_DEPARTURES_PER_PANEL`'s precedent. Not a current overflow risk at
+/// the target 1200x1920 resolution (Serie A's 20 rows land around
+/// y≈1272), but defends against a future competition with more teams
+/// ever overdrawing past the panel.
+pub const MAX_STANDINGS_ROWS_PER_PANEL: usize = 24;
+
+pub fn format_standings_panel(
+    competition_label: &str,
+    state: &StandingsPanelState,
+) -> StandingsPanelDisplay {
+    let (rows, stale_note) = match state {
+        StandingsPanelState::Fresh(rows) => (rows.as_slice(), None),
+        StandingsPanelState::Stale { rows, age } => (
+            rows.as_slice(),
+            Some(format!("stale, {}m old", age.whole_minutes())),
+        ),
+        StandingsPanelState::Unavailable => {
+            return StandingsPanelDisplay {
+                header: competition_label.to_string(),
+                lines: vec!["standings unavailable".to_string()],
+                stale_note: None,
+            };
+        }
+    };
+
+    let header = rows
+        .first()
+        .map(|row| format!("{}  {}", row.competition, row.season))
+        .unwrap_or_else(|| competition_label.to_string());
+
+    // Rendered in the exact order `StandingsBoard` stored them, which is
+    // the provider's own ranking (including tied points) - never
+    // re-sorted here.
+    let mut lines: Vec<String> = rows
+        .iter()
+        .take(MAX_STANDINGS_ROWS_PER_PANEL)
+        .map(|row| {
+            format!(
+                "{}. {}  P{} GD{:+} {}pts",
+                row.position, row.team, row.played, row.goal_difference, row.points
+            )
+        })
+        .collect();
+
+    if lines.is_empty() {
+        lines.push("no standings".to_string());
+    }
+
+    StandingsPanelDisplay {
+        header,
+        lines,
+        stale_note,
+    }
+}
+
+/// Draws the currently-rotated competition's standings panel. Keep this
+/// thin: all text content comes from `format_standings_panel`, which is
+/// covered by unit tests that don't need a window.
+pub fn render_standings_panel(competition_label: &str, state: &StandingsPanelState, top: f32) {
+    use macroquad::color::{GRAY, ORANGE, WHITE};
+    use macroquad::text::draw_text;
+
+    const LINE_HEIGHT: f32 = 28.0;
+
+    let display = format_standings_panel(competition_label, state);
+
+    let color = match state {
+        StandingsPanelState::Fresh(_) => WHITE,
+        StandingsPanelState::Stale { .. } => ORANGE,
+        StandingsPanelState::Unavailable => GRAY,
+    };
+
+    let mut y = top + 24.0;
+    draw_text(&display.header, 20.0, y, 26.0, color);
+    y += LINE_HEIGHT;
+
+    if let Some(note) = &display.stale_note {
+        draw_text(note, 20.0, y, 20.0, ORANGE);
+        y += LINE_HEIGHT;
+    }
+
+    for line in &display.lines {
+        draw_text(line, 20.0, y, 24.0, color);
+        y += LINE_HEIGHT;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +515,72 @@ mod tests {
         assert_eq!(display.lines.len(), MAX_DEPARTURES_PER_PANEL);
         assert!(display.lines[0].contains("Stop 0"));
         assert!(display.lines[5].contains("Stop 5"));
+    }
+
+    fn standings_row(position: u32, team: &str, points: i32) -> crate::standings::StandingsRow {
+        crate::standings::StandingsRow {
+            competition: "Serie A".to_string(),
+            season: "2025/2026".to_string(),
+            position,
+            team: team.to_string(),
+            played: 13,
+            goal_difference: 10,
+            points,
+        }
+    }
+
+    #[test]
+    fn formats_a_fresh_standings_panel_header_with_competition_and_season() {
+        let state = StandingsPanelState::Fresh(vec![standings_row(1, "Internazionale", 32)]);
+        let display = format_standings_panel("serie-a", &state);
+        assert_eq!(display.header, "Serie A  2025/2026");
+        assert_eq!(display.stale_note, None);
+    }
+
+    #[test]
+    fn preserves_provider_order_including_tied_points_when_rendering() {
+        let state = StandingsPanelState::Fresh(vec![
+            standings_row(2, "Napoli", 30),
+            standings_row(3, "Juventus", 30),
+        ]);
+        let display = format_standings_panel("serie-a", &state);
+        assert!(display.lines[0].contains("Napoli"));
+        assert!(display.lines[1].contains("Juventus"));
+    }
+
+    #[test]
+    fn formats_a_stale_standings_panel_distinctly_from_fresh() {
+        let state = StandingsPanelState::Stale {
+            rows: vec![standings_row(1, "Internazionale", 32)],
+            age: Duration::hours(3),
+        };
+        let display = format_standings_panel("serie-a", &state);
+        assert_eq!(display.stale_note, Some("stale, 180m old".to_string()));
+    }
+
+    #[test]
+    fn caps_rendered_standings_rows_keeping_the_top_of_the_table() {
+        let rows: Vec<crate::standings::StandingsRow> = (1..=30)
+            .map(|position| {
+                standings_row(position, &format!("Team {position}"), 100 - position as i32)
+            })
+            .collect();
+
+        let state = StandingsPanelState::Fresh(rows);
+        let display = format_standings_panel("serie-a", &state);
+
+        assert_eq!(display.lines.len(), MAX_STANDINGS_ROWS_PER_PANEL);
+        assert!(display.lines[0].contains("Team 1"));
+        assert!(
+            display.lines[MAX_STANDINGS_ROWS_PER_PANEL - 1]
+                .contains(&format!("Team {MAX_STANDINGS_ROWS_PER_PANEL}"))
+        );
+    }
+
+    #[test]
+    fn formats_unavailable_standings_using_the_configured_competition_label() {
+        let display = format_standings_panel("allsvenskan", &StandingsPanelState::Unavailable);
+        assert_eq!(display.header, "allsvenskan");
+        assert_eq!(display.lines, vec!["standings unavailable".to_string()]);
     }
 }

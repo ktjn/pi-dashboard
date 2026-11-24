@@ -38,6 +38,8 @@ struct RawCompetition {
     id: String,
     provider: String,
     competition_code: String,
+    #[serde(default)]
+    highlightly_league_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,6 +176,12 @@ pub struct Competition {
     pub id: String,
     pub provider: FootballProvider,
     pub competition_code: String,
+    /// Highlightly's numeric `leagueId` (resolved offline via their
+    /// `/leagues?leagueName=...&countryCode=...` lookup - there is no
+    /// alpha-code scheme like football-data.org's). Required only for
+    /// `provider = "highlightly"` competitions; football-data.org uses
+    /// `competition_code` directly instead.
+    pub highlightly_league_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -302,10 +310,17 @@ fn validate(raw: RawBoardConfig) -> Result<BoardConfig, BoardConfigError> {
                 competition.provider
             ))
         })?;
+        if provider == FootballProvider::Highlightly && competition.highlightly_league_id.is_none()
+        {
+            return Err(BoardConfigError::Invalid(format!(
+                "competitions[{index}].highlightly_league_id: is required when provider is highlightly"
+            )));
+        }
         competitions.push(Competition {
             id: competition.id,
             provider,
             competition_code: competition.competition_code,
+            highlightly_league_id: competition.highlightly_league_id,
         });
     }
 

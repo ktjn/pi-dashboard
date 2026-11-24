@@ -1,0 +1,24 @@
+{
+  "competition": { "id": 2019, "name": "Serie A", "code": "SA" },
+  "season": { "id": 2411, "startDate": "2025-08-17", "endDate": "2026-05-24", "currentMatchday": 13 },
+  "standings": [
+    {
+      "stage": "REGULAR_SEASON",
+      "type": "TOTAL",
+      "group": null,
+      "table": [
+        { "position": 1, "team": { "id": 108, "name": "Internazionale" }, "playedGames": 13, "form": null, "won": 10, "draw": 2, "lost": 1, "points": 32, "goalsFor": 28, "goalsAgainst": 10, "goalDifference": 18 },
+        { "position": 2, "team": { "id": 109, "name": "Napoli" }, "playedGames": 13, "form": null, "won": 9, "draw": 3, "lost": 1, "points": 30, "goalsFor": 25, "goalsAgainst": 12, "goalDifference": 13 },
+        { "position": 3, "team": { "id": 110, "name": "Juventus" }, "playedGames": 13, "form": null, "won": 9, "draw": 3, "lost": 1, "points": 30, "goalsFor": 22, "goalsAgainst": 14, "goalDifference": 8 }
+      ]
+    },
+    {
+      "stage": "REGULAR_SEASON",
+      "type": "HOME",
+      "group": null,
+      "table": [
+        { "position": 1, "team": { "id": 110, "name": "Juventus" }, "playedGames": 7, "form": null, "won": 5, "draw": 1, "lost": 1, "points": 16, "goalsFor": 12, "goalsAgainst": 5, "goalDifference": 7 }
+      ]
+    }
+  ]
+}
