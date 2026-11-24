@@ -1,4 +1,5 @@
 use crate::clock::LocalClock;
+use crate::daylight::DaylightWindow;
 use crate::weather::WeatherPanelState;
 
 /// Text content for the clock + weather header, factored out of the
@@ -56,6 +57,62 @@ pub fn render_clock_weather_header(clock: &LocalClock, weather_state: &WeatherPa
         WeatherPanelState::Unavailable => GRAY,
     };
     draw_text(&display.weather_text, 220.0, 50.0, 40.0, weather_color);
+}
+
+/// Text content for the daylight strip, factored out of the macroquad
+/// drawing calls for the same reason as `format_clock_weather_header`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DaylightStripDisplay {
+    pub civil_dawn_text: String,
+    pub sunrise_text: String,
+    pub sunset_text: String,
+    pub civil_dusk_text: String,
+    pub duration_text: String,
+}
+
+fn format_hhmm(datetime: jiff::civil::DateTime) -> String {
+    format!("{:02}:{:02}", datetime.hour(), datetime.minute())
+}
+
+pub fn format_daylight_strip(window: &DaylightWindow) -> DaylightStripDisplay {
+    let duration_text = match window.daylight_duration() {
+        Ok(span) => format!("{}h {:02}m daylight", span.get_hours(), span.get_minutes()),
+        Err(_) => "daylight duration unavailable".to_string(),
+    };
+
+    DaylightStripDisplay {
+        civil_dawn_text: format_hhmm(window.civil_dawn),
+        sunrise_text: format_hhmm(window.sunrise),
+        sunset_text: format_hhmm(window.sunset),
+        civil_dusk_text: format_hhmm(window.civil_dusk),
+        duration_text,
+    }
+}
+
+/// Draws the daylight strip. Keep this thin: all text content comes from
+/// `format_daylight_strip`, which is covered by unit tests that don't need
+/// a window.
+pub fn render_daylight_strip(window: &DaylightWindow) {
+    use macroquad::color::{DARKGRAY, WHITE};
+    use macroquad::shapes::draw_rectangle;
+    use macroquad::text::draw_text;
+    use macroquad::window::screen_width;
+
+    const STRIP_Y: f32 = 80.0;
+    const STRIP_HEIGHT: f32 = 40.0;
+
+    let display = format_daylight_strip(window);
+
+    draw_rectangle(0.0, STRIP_Y, screen_width(), STRIP_HEIGHT, DARKGRAY);
+    let text = format!(
+        "Dawn {}  Sunrise {}  Sunset {}  Dusk {}  ({})",
+        display.civil_dawn_text,
+        display.sunrise_text,
+        display.sunset_text,
+        display.civil_dusk_text,
+        display.duration_text
+    );
+    draw_text(&text, 20.0, STRIP_Y + 28.0, 24.0, WHITE);
 }
 
 #[cfg(test)]
@@ -118,5 +175,29 @@ mod tests {
     fn formats_unavailable_as_unavailable_not_stale_garbage() {
         let display = format_clock_weather_header(&clock(), &WeatherPanelState::Unavailable);
         assert_eq!(display.weather_text, "weather unavailable");
+    }
+
+    #[test]
+    fn formats_daylight_times_as_hh_mm_with_duration() {
+        use jiff::civil::date;
+
+        // Hand-constructed rather than driven through the real solar
+        // engine, so this test only exercises formatting and doesn't flake
+        // on future engine-precision changes.
+        let window = DaylightWindow {
+            date: date(2026, 6, 21),
+            civil_dawn: date(2026, 6, 21).at(1, 58, 0, 0),
+            sunrise: date(2026, 6, 21).at(3, 31, 0, 0),
+            sunset: date(2026, 6, 21).at(22, 9, 0, 0),
+            civil_dusk: date(2026, 6, 21).at(23, 41, 0, 0),
+        };
+
+        let display = format_daylight_strip(&window);
+
+        assert_eq!(display.civil_dawn_text, "01:58");
+        assert_eq!(display.sunrise_text, "03:31");
+        assert_eq!(display.sunset_text, "22:09");
+        assert_eq!(display.civil_dusk_text, "23:41");
+        assert_eq!(display.duration_text, "18h 38m daylight");
     }
 }

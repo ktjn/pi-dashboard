@@ -1,10 +1,12 @@
 use dashboard_core::board_config::load_board_config;
 use dashboard_core::clock::local_clock;
-use dashboard_core::render::render_clock_weather_header;
+use dashboard_core::daylight::daylight_window;
+use dashboard_core::render::{render_clock_weather_header, render_daylight_strip};
 use dashboard_core::weather::{
     WeatherFetchError, WeatherReading, WeatherSnapshotStore, WeatherSource,
     parse_open_meteo_response,
 };
+use jiff::civil::Date;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
@@ -85,6 +87,9 @@ async fn main() {
     let weather_source = OpenMeteoWeatherSource::new(board_config.latitude, board_config.longitude);
     spawn_weather_refresh_thread(weather_source, Arc::clone(&weather_store));
 
+    let mut daylight_date: Option<Date> = None;
+    let mut daylight = None;
+
     loop {
         let now_utc = OffsetDateTime::now_utc();
 
@@ -97,6 +102,26 @@ async fn main() {
                     .expect("weather store mutex poisoned")
                     .state(now_utc);
                 render_clock_weather_header(&clock, &weather_state);
+
+                match Date::new(clock.year, clock.month as i8, clock.day as i8) {
+                    Ok(today) => {
+                        if daylight_date != Some(today) {
+                            daylight = daylight_window(
+                                &board_config.time_zone,
+                                board_config.latitude,
+                                board_config.longitude,
+                                today,
+                            )
+                            .inspect_err(|error| eprintln!("daylight computation failed: {error}"))
+                            .ok();
+                            daylight_date = Some(today);
+                        }
+                        if let Some(window) = &daylight {
+                            render_daylight_strip(window);
+                        }
+                    }
+                    Err(error) => eprintln!("local date computation failed: {error}"),
+                }
             }
             Err(error) => eprintln!("clock computation failed: {error}"),
         }

@@ -219,6 +219,7 @@ dependencies = [
  "macroquad",
  "serde",
  "serde_json",
+ "solar-positioning",
  "time",
  "toml",
 ]
@@ -228,6 +229,7 @@ name = "dashboard-pi"
 version = "0.1.0"
 dependencies = [
  "dashboard-core",
+ "jiff",
  "macroquad",
  "reqwest",
  "time",
@@ -238,6 +240,7 @@ name = "dashboard-web"
 version = "0.1.0"
 dependencies = [
  "dashboard-core",
+ "jiff",
  "macroquad",
  "time",
 ]
@@ -1461,6 +1464,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "solar-positioning"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98fbe317619504652607ac80f0ab3107afcec5a04bfaa35c5f592dbb17bddcf6"
 
 [[package]]
 name = "stable_deref_trait"

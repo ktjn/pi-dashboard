@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 dashboard-core = { path = "../dashboard-core" }
+jiff = { version = "1.0.3", default-features = false, features = ["std", "tzdb-bundle-always"] }
 macroquad.workspace = true
 reqwest = { version = "0.13.5", features = ["blocking"] }
 time = "0.3.55"
