@@ -4,5 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-dashboard-core = { path = "../dashboard-core" }
+dashboard-core = { path = "../dashboard-core", features = ["fixtures"] }
 macroquad.workspace = true
+time = { version = "0.3.55", features = ["macros"] }
