@@ -81,7 +81,11 @@ pub enum TransitMode {
 }
 
 impl TransitMode {
-    fn parse(value: &str) -> Option<Self> {
+    /// `pub(crate)`, not private: the SL departures/deviations client in
+    /// `departures.rs` parses the same `METRO`/`TRAIN`/... vocabulary from
+    /// the live API and must map onto this one enum rather than duplicating
+    /// it.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "METRO" => Some(Self::Metro),
             "TRAIN" => Some(Self::Train),
