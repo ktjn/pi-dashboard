@@ -1,0 +1,10 @@
+[package]
+name = "dashboard-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+macroquad.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+time = { version = "0.3.55", features = ["parsing", "macros", "serde"] }
+toml = "1.2.2"

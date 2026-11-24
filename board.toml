@@ -1,0 +1,60 @@
+[location]
+time_zone = "Europe/Stockholm"
+latitude = 59.3626
+longitude = 17.9158
+
+[[stations]]
+site_id = 9324
+name = "Duvbo"
+mode = "METRO"
+walk_time_min = 10
+direction = "stockholm"
+
+[[stations]]
+site_id = 9325
+name = "Sundbyberg"
+mode = "TRAIN"
+walk_time_min = 15
+direction = "stockholm"
+
+[[competitions]]
+id = "allsvenskan"
+provider = "highlightly"
+competition_code = "ALLSV"
+
+[[competitions]]
+id = "serie-a"
+provider = "football-data-org"
+competition_code = "SA"
+
+[[display_windows]]
+day_type = "weekday"
+start = "06:00"
+end = "09:00"
+
+[[display_windows]]
+day_type = "weekday"
+start = "16:00"
+end = "22:30"
+
+[[display_windows]]
+day_type = "weekend"
+start = "08:00"
+end = "23:00"
+
+[screensaver]
+calendar_id = "primary"
+credential_ref = "google-service-account"
+content_mode = "clock"
+
+[[screensaver.rules]]
+pattern = "Focus"
+match_type = "substring"
+
+[[screensaver.rules]]
+pattern = "^Away"
+match_type = "regex"
+
+[panel_rotation]
+interval_seconds = 15
+panels = ["football"]

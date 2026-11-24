@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = ["dashboard-core", "dashboard-pi", "dashboard-web"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+macroquad = "0.4.16"

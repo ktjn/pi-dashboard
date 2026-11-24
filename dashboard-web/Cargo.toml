@@ -1,0 +1,8 @@
+[package]
+name = "dashboard-web"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dashboard-core = { path = "../dashboard-core" }
+macroquad.workspace = true
