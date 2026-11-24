@@ -1,0 +1,11 @@
+[location]
+time_zone = "Europe/Stockholm"
+latitude = 200.0
+longitude = 17.9158
+
+[[stations]]
+site_id = 9324
+name = "Duvbo"
+mode = "METRO"
+walk_time_min = 10
+direction = "stockholm"

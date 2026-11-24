@@ -1,0 +1,8 @@
+[package]
+name = "dashboard-pi"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dashboard-core = { path = "../dashboard-core" }
+macroquad.workspace = true

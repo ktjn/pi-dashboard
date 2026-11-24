@@ -1,0 +1,10 @@
+[location]
+time_zone = "Europe/Stockholm"
+latitude = 59.3626
+longitude = 17.9158
+
+[[stations]]
+site_id = 9324
+mode = "METRO"
+walk_time_min = 10
+direction = "stockholm"

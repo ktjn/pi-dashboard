@@ -1,0 +1,21 @@
+[location]
+time_zone = "Europe/Stockholm"
+latitude = 59.3626
+longitude = 17.9158
+
+[[stations]]
+site_id = 9324
+name = "Duvbo"
+mode = "METRO"
+walk_time_min = 10
+direction = "stockholm"
+
+[[competitions]]
+id = "allsvenskan"
+provider = "highlightly"
+competition_code = "ALLSV"
+
+[[display_windows]]
+day_type = "weekday"
+start = "09:00"
+end = "06:00"
