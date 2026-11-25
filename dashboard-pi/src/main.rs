@@ -1,3 +1,5 @@
+mod remote_control;
+
 use dashboard_core::board_config::{BoardConfig, FootballProvider, Screensaver, load_board_config};
 use dashboard_core::clock::local_clock;
 use dashboard_core::daylight::daylight_window;
@@ -10,8 +12,8 @@ use dashboard_core::render::{
     render_departures_panel, render_screensaver_view, render_standings_panel,
 };
 use dashboard_core::schedule::{
-    DisplayPowerControl, DisplayState, NullDisplayPowerControl, is_within_display_window,
-    reconcile, resolved_power,
+    DisplayPowerControl, DisplayState, NullDisplayPowerControl, active_override_power,
+    is_within_display_window, reconcile, resolved_power,
 };
 use dashboard_core::screensaver::{
     CalendarEvent, CalendarFetchError, CalendarPollState, CalendarSource,
@@ -68,6 +70,17 @@ const CALENDAR_TOKEN_REFRESH_SKEW_SECONDS: i64 = 30;
 /// deliberately unimplemented - see PI-07's review) is never needed even on
 /// a busy calendar.
 const CALENDAR_QUERY_WINDOW: time::Duration = time::Duration::hours(1);
+/// Where the HTTP server writes the manual-override state and the
+/// display-power reconciliation thread reads it from - a stand-in today
+/// for the eventual systemd-timer-reads-the-file design
+/// (`pi-dashboard-spec.md`'s PI-08 section): this process's own background
+/// thread plays the timer's role until the real systemd timer exists.
+const OVERRIDE_FILE_PATH: &str = "override-state.json";
+/// Per `pi-dashboard-spec.md`: "provisioned once in the same manually-created
+/// systemd `EnvironmentFile` as other credentials" - same pattern as
+/// `FOOTBALL_DATA_ORG_API_KEY`/`HIGHLIGHTLY_API_KEY`, never a config file.
+const REMOTE_CONTROL_TOKEN_ENV_VAR: &str = "REMOTE_CONTROL_TOKEN";
+const REMOTE_CONTROL_BIND_ADDRESS: &str = "0.0.0.0:8080";
 
 /// Deserialized shape of a Google service-account JSON key file (the
 /// credential format Google's console issues) - unverified live, built
@@ -639,7 +652,10 @@ fn spawn_display_power_reconciliation_thread(
         let mut last_power: Option<bool> = None;
         loop {
             let now_utc = OffsetDateTime::now_utc();
-            let override_active = None;
+            let override_active = active_override_power(
+                remote_control::read_override_state(Path::new(OVERRIDE_FILE_PATH)),
+                now_utc,
+            );
             let screensaver_active = calendar_poll_state
                 .lock()
                 .expect("calendar poll state mutex poisoned")
@@ -662,6 +678,43 @@ fn spawn_display_power_reconciliation_thread(
 
             std::thread::sleep(DISPLAY_POWER_RECONCILE_INTERVAL);
         }
+    });
+}
+
+/// Runs the remote-control HTTP server on its own OS thread, with its own
+/// dedicated `tokio` runtime confined to that thread - `axum`/`tokio` are a
+/// new async-runtime addition for this binary (everything else here uses
+/// `macroquad`'s own executor for the render loop and plain
+/// `std::thread`/`reqwest::blocking` for the background feeds). Keeping
+/// `tokio` isolated to this one thread means the render loop and the other
+/// background threads are completely unaffected by it; if the server
+/// thread's runtime ever panics, every other part of the dashboard keeps
+/// running.
+fn spawn_remote_control_server(state: remote_control::RemoteControlState) {
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("remote-control server runtime failed to start: {error}");
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            let router = remote_control::remote_control_router(state);
+            match tokio::net::TcpListener::bind(REMOTE_CONTROL_BIND_ADDRESS).await {
+                Ok(listener) => {
+                    if let Err(error) = axum::serve(listener, router).await {
+                        eprintln!("remote-control server failed: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("remote-control server failed to bind: {error}");
+                }
+            }
+        });
     });
 }
 
@@ -708,6 +761,33 @@ async fn main() {
             .unwrap_or(STANDINGS_ROTATION_DEFAULT_INTERVAL_SECONDS),
     );
 
+    match std::env::var(REMOTE_CONTROL_TOKEN_ENV_VAR) {
+        Ok(expected_token) => {
+            spawn_remote_control_server(remote_control::RemoteControlState {
+                expected_token: Arc::new(expected_token),
+                override_path: Arc::new(Path::new(OVERRIDE_FILE_PATH).to_path_buf()),
+                time_zone: Arc::new(board_config.time_zone.clone()),
+                display_windows: Arc::new(board_config.display_windows.clone()),
+                stations: Arc::new(board_config.stations.clone()),
+                competition_ids: Arc::new(
+                    board_config
+                        .competitions
+                        .iter()
+                        .map(|competition| competition.id.clone())
+                        .collect(),
+                ),
+                weather_store: Arc::clone(&weather_store),
+                departures_board: Arc::clone(&departures_board),
+                standings_board: Arc::clone(&standings_board),
+                calendar_poll_state: Arc::clone(&calendar_poll_state),
+                started_at: std::time::Instant::now(),
+            });
+        }
+        Err(_) => {
+            eprintln!("{REMOTE_CONTROL_TOKEN_ENV_VAR} is not set: remote-control server disabled")
+        }
+    }
+
     let mut daylight_date: Option<Date> = None;
     let mut daylight = None;
 
@@ -722,8 +802,7 @@ async fn main() {
                 // `reconcile` call: same inputs, read independently here so
                 // the render loop's "show the screensaver or the normal
                 // layout" decision never depends on the power-reconciler
-                // thread's timing. `override_active` stays `None` until
-                // PI-08 adds the real override file.
+                // thread's timing.
                 let screensaver_active = calendar_poll_state
                     .lock()
                     .expect("calendar poll state mutex poisoned")
@@ -735,7 +814,12 @@ async fn main() {
                 )
                 .inspect_err(|error| eprintln!("display-window evaluation failed: {error}"))
                 .unwrap_or(true);
-                let display_state = reconcile(schedule_says_awake, None, screensaver_active);
+                let override_active = active_override_power(
+                    remote_control::read_override_state(Path::new(OVERRIDE_FILE_PATH)),
+                    now_utc,
+                );
+                let display_state =
+                    reconcile(schedule_says_awake, override_active, screensaver_active);
 
                 if display_state == DisplayState::Screensaver {
                     let availability = calendar_poll_state

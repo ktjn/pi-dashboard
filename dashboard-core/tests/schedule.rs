@@ -1,7 +1,8 @@
 use dashboard_core::board_config::{DayType, DisplayWindow};
 use dashboard_core::schedule::{
-    DisplayPowerControl, DisplayState, OverridePower, ScheduleError, is_within_display_window,
-    reconcile, resolved_power,
+    DisplayPowerControl, DisplayState, OverridePower, OverrideState, ScheduleError,
+    active_override_power, is_within_display_window, next_window_boundary, reconcile,
+    resolved_power,
 };
 use time::macros::{datetime, time};
 
@@ -282,4 +283,118 @@ fn null_display_power_control_records_every_call_without_touching_hardware() {
     control.set_power(false).expect("set_power must succeed");
 
     assert_eq!(control.calls(), &[true, true, false]);
+}
+
+// --- next_window_boundary ---
+
+#[test]
+fn next_boundary_from_before_the_morning_window_is_its_start() {
+    // 2026-11-24 is a Tuesday. 05:00 local (04:00 UTC, Stockholm is UTC+1 in
+    // November) is before the 06:00-09:00 weekday window; the next
+    // boundary is that window's start, 06:00 local = 05:00 UTC.
+    let now_utc = datetime!(2026-11-24 04:00:00 UTC);
+    let boundary = next_window_boundary(&weekday_windows(), STOCKHOLM_TZ, now_utc)
+        .expect("a boundary must exist");
+    assert_eq!(boundary, datetime!(2026-11-24 05:00:00 UTC));
+}
+
+#[test]
+fn next_boundary_from_inside_the_morning_window_is_its_end() {
+    // 07:00 local (06:00 UTC) is inside 06:00-09:00; the next boundary is
+    // that window's end, 09:00 local = 08:00 UTC.
+    let now_utc = datetime!(2026-11-24 06:00:00 UTC);
+    let boundary = next_window_boundary(&weekday_windows(), STOCKHOLM_TZ, now_utc)
+        .expect("a boundary must exist");
+    assert_eq!(boundary, datetime!(2026-11-24 08:00:00 UTC));
+}
+
+#[test]
+fn next_boundary_is_strictly_after_now_even_exactly_at_a_boundary() {
+    // now_utc lands exactly on the window's start instant (06:00 local).
+    // The next boundary must be the *following* one (the window's end),
+    // not the instant we are already at.
+    let now_utc = datetime!(2026-11-24 05:00:00 UTC);
+    let boundary = next_window_boundary(&weekday_windows(), STOCKHOLM_TZ, now_utc)
+        .expect("a boundary must exist");
+    assert_eq!(boundary, datetime!(2026-11-24 08:00:00 UTC));
+}
+
+#[test]
+fn next_boundary_crosses_from_a_weekday_into_the_weekend_day_type() {
+    // 2026-11-27 is a Friday; 23:00 local (22:00 UTC) is after the last
+    // weekday window (16:00-22:30) ends. The next boundary is the
+    // following day's (Saturday, weekend day-type) window start:
+    // 08:00 local 2026-11-28 = 07:00 UTC.
+    let now_utc = datetime!(2026-11-27 22:00:00 UTC);
+    let boundary = next_window_boundary(&weekday_windows(), STOCKHOLM_TZ, now_utc)
+        .expect("a boundary must exist");
+    assert_eq!(boundary, datetime!(2026-11-28 07:00:00 UTC));
+}
+
+#[test]
+fn next_boundary_is_dst_correct_across_the_spring_forward_transition() {
+    // 2026-03-28 is a Saturday (weekend window 08:00-23:00); 23:30 local
+    // is pre-transition UTC+1, so 22:30 UTC. The next boundary is Sunday
+    // 2026-03-29's weekend-window start, 08:00 local - but by then
+    // Stockholm's spring-forward transition (01:00 UTC) has already
+    // happened, so the correct offset is UTC+2: 06:00 UTC, not 07:00 UTC.
+    let now_utc = datetime!(2026-03-28 22:30:00 UTC);
+    let boundary = next_window_boundary(&weekday_windows(), STOCKHOLM_TZ, now_utc)
+        .expect("a boundary must succeed across a spring-forward transition");
+    assert_eq!(boundary, datetime!(2026-03-29 06:00:00 UTC));
+}
+
+#[test]
+fn next_boundary_rejects_an_unrecognized_time_zone_without_panicking() {
+    let now_utc = datetime!(2026-11-24 05:30:00 UTC);
+    let error = next_window_boundary(&weekday_windows(), "Not/AZone", now_utc).unwrap_err();
+    assert!(matches!(error, ScheduleError::UnknownTimeZone(_)));
+}
+
+#[test]
+fn next_boundary_errors_without_panicking_when_no_windows_are_configured() {
+    let now_utc = datetime!(2026-11-24 05:30:00 UTC);
+    let error = next_window_boundary(&[], STOCKHOLM_TZ, now_utc).unwrap_err();
+    assert!(matches!(error, ScheduleError::NoUpcomingBoundary));
+}
+
+// --- active_override_power / override expiry ---
+
+#[test]
+fn an_override_before_its_expiry_is_active() {
+    let state = OverrideState {
+        power: OverridePower::Off,
+        expires_at: datetime!(2026-11-24 08:00:00 UTC),
+    };
+    let now_utc = datetime!(2026-11-24 06:00:00 UTC);
+    assert_eq!(
+        active_override_power(Some(state), now_utc),
+        Some(OverridePower::Off)
+    );
+}
+
+#[test]
+fn an_override_exactly_at_its_expiry_is_no_longer_active() {
+    let state = OverrideState {
+        power: OverridePower::Off,
+        expires_at: datetime!(2026-11-24 08:00:00 UTC),
+    };
+    let now_utc = datetime!(2026-11-24 08:00:00 UTC);
+    assert_eq!(active_override_power(Some(state), now_utc), None);
+}
+
+#[test]
+fn an_override_past_its_expiry_is_no_longer_active() {
+    let state = OverrideState {
+        power: OverridePower::On,
+        expires_at: datetime!(2026-11-24 08:00:00 UTC),
+    };
+    let now_utc = datetime!(2026-11-24 09:00:00 UTC);
+    assert_eq!(active_override_power(Some(state), now_utc), None);
+}
+
+#[test]
+fn no_override_state_resolves_to_no_active_override() {
+    let now_utc = datetime!(2026-11-24 06:00:00 UTC);
+    assert_eq!(active_override_power(None, now_utc), None);
 }
