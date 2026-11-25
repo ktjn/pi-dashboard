@@ -720,6 +720,16 @@ fn spawn_remote_control_server(state: remote_control::RemoteControlState) {
 
 #[macroquad::main("pi-dashboard")]
 async fn main() {
+    // reqwest's `rustls-no-provider` feature (see dashboard-pi/Cargo.toml -
+    // avoids aws-lc-sys's non-optional `cmake` build-dependency, which the
+    // default `cross-rs` aarch64 image doesn't ship) ships no crypto
+    // provider of its own: install `ring`'s before any reqwest client is
+    // built, exactly as reqwest's own tls.rs docs instruct, or every
+    // reqwest::blocking::Client::builder() call below panics at construction.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring crypto provider");
+
     let board_config = match load_board_config(Path::new("board.toml")) {
         Ok(board_config) => board_config,
         Err(error) => {
