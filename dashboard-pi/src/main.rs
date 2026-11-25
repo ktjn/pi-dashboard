@@ -24,6 +24,7 @@ use dashboard_core::standings::{
     StandingsSource, fetch_highlightly_standings, parse_football_data_standings_response,
     parse_highlightly_current_season_response, parse_highlightly_standings_response,
 };
+use dashboard_core::theme::{Theme, load_fonts, palette};
 use dashboard_core::weather::{
     WeatherFetchError, WeatherReading, WeatherSnapshotStore, WeatherSource,
     parse_open_meteo_response,
@@ -798,13 +799,19 @@ async fn main() {
         }
     }
 
+    let (mono_font, sans_font) = load_fonts().expect("vendored fonts must load");
+    let theme = Theme {
+        mono: &mono_font,
+        sans: &sans_font,
+    };
+
     let mut daylight_date: Option<Date> = None;
     let mut daylight = None;
 
     loop {
         let now_utc = OffsetDateTime::now_utc();
 
-        macroquad::window::clear_background(macroquad::color::BLACK);
+        macroquad::window::clear_background(palette::INK);
 
         match local_clock(&board_config.time_zone, now_utc) {
             Ok(clock) => {
@@ -836,7 +843,7 @@ async fn main() {
                         .lock()
                         .expect("calendar poll state mutex poisoned")
                         .availability(now_utc);
-                    render_screensaver_view(&clock, &availability);
+                    render_screensaver_view(&clock, &availability, &theme);
                     macroquad::window::next_frame().await;
                     continue;
                 }
@@ -845,7 +852,7 @@ async fn main() {
                     .lock()
                     .expect("weather store mutex poisoned")
                     .state(now_utc);
-                render_clock_weather_header(&clock, &weather_state);
+                render_clock_weather_header(&clock, &weather_state, &theme);
 
                 match Date::new(clock.year, clock.month as i8, clock.day as i8) {
                     Ok(today) => {
@@ -861,7 +868,7 @@ async fn main() {
                             daylight_date = Some(today);
                         }
                         if let Some(window) = &daylight {
-                            render_daylight_strip(window);
+                            render_daylight_strip(window, &theme);
                         }
                     }
                     Err(error) => eprintln!("local date computation failed: {error}"),
@@ -874,7 +881,7 @@ async fn main() {
                         .expect("departures board mutex poisoned");
                     for station in &board_config.stations {
                         let state = board.station_state(station, now_utc);
-                        render_departures_panel(&state, panel_top);
+                        render_departures_panel(&state, panel_top, &theme);
                         panel_top += STATION_PANEL_HEIGHT;
                     }
                 }
@@ -884,7 +891,7 @@ async fn main() {
                     .lock()
                     .expect("standings board mutex poisoned")
                     .competition_state(active_competition_id, now_utc);
-                render_standings_panel(active_competition_id, &standings_state, panel_top);
+                render_standings_panel(active_competition_id, &standings_state, panel_top, &theme);
             }
             Err(error) => eprintln!("clock computation failed: {error}"),
         }
