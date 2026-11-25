@@ -24,7 +24,7 @@ jobs:
 
       - run: cargo test --workspace
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.4.0
 
       - run: uv run --project system-spec/reference-implementation python system-spec/reference-implementation/metamodel.py spec.yaml --stage verification
 
