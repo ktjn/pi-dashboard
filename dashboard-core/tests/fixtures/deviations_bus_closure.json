@@ -1,0 +1,33 @@
+[
+  {
+    "version": 2,
+    "created": "2024-01-03T07:45:54.66+01:00",
+    "modified": "2024-01-03T07:45:54.66+01:00",
+    "deviation_case_id": 93075231,
+    "publish": {
+      "from": "2024-01-03T07:45:54.647+01:00",
+      "upto": "2026-12-31T23:30:00+01:00"
+    },
+    "priority": {
+      "importance_level": 7,
+      "influence_level": 3,
+      "urgency_level": 1
+    },
+    "message_variants": [
+      {
+        "header": "Indragna hållplatser",
+        "details": "Buss linje 819, 823 och 824 stannar inte vid Södergården.",
+        "scope_alias": "Buss 819, 823, 824",
+        "language": "sv"
+      }
+    ],
+    "scope": {
+      "stop_areas": [
+        { "id": 80351, "name": "Södergården", "type": "BUSTERM", "transport_authority": 1 }
+      ],
+      "lines": [
+        { "id": 819, "transport_authority": 1, "designation": "819", "transport_mode": "BUS" }
+      ]
+    }
+  }
+]

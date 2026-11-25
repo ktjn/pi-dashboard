@@ -1,0 +1,33 @@
+{
+  "departures": [
+    {
+      "destination": "Solna",
+      "direction": "Solna",
+      "scheduled": "2026-11-24T22:46:18",
+      "expected": "2026-11-24T22:46:18",
+      "line": {
+        "id": 5,
+        "designation": "503",
+        "transport_authority_id": 1,
+        "transport_mode": "BUS",
+        "group_of_lines": "none"
+      },
+      "deviations": []
+    },
+    {
+      "destination": "Nowhere",
+      "direction": "Nowhere",
+      "scheduled": "2026-11-24T22:50:00",
+      "expected": "2026-11-24T22:50:00",
+      "line": {
+        "id": 99,
+        "designation": "X",
+        "transport_authority_id": 1,
+        "transport_mode": "TAXI",
+        "group_of_lines": "none"
+      },
+      "deviations": []
+    }
+  ],
+  "stop_deviations": []
+}

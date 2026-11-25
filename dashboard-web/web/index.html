@@ -1,0 +1,30 @@
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>pi-dashboard playground</title>
+    <style>
+        html,
+        body,
+        canvas {
+            margin: 0px;
+            padding: 0px;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            position: absolute;
+            background: black;
+            z-index: 0;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="glcanvas" tabindex='1'></canvas>
+    <!-- Vendored copy of macroquad 0.4.16's js/mq_js_bundle.js, so the
+         playground never depends on an external CDN at deploy time. -->
+    <script src="mq_js_bundle.js"></script>
+    <script>load("dashboard-web.wasm");</script>
+</body>
+
+</html>

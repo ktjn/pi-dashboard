@@ -3,8 +3,18 @@ name = "dashboard-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+fixtures = []
+
 [dependencies]
+jiff = { version = "1.0.3", default-features = false, features = ["std", "tzdb-bundle-always"] }
 macroquad.workspace = true
+regex = "1.13.2"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+solar-positioning = { version = "0.7.2", default-features = false, features = ["std"] }
 time = { version = "0.3.55", features = ["parsing", "macros", "serde"] }
 toml = "1.2.2"
+
+[dev-dependencies]
+dashboard-core = { path = ".", features = ["fixtures"] }

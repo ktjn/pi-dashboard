@@ -1,0 +1,28 @@
+{
+  "groups": [
+    {
+      "name": "Allsvenskan",
+      "standings": [
+        {
+          "position": 1,
+          "points": 55,
+          "team": { "id": 501, "name": "Malmö FF", "logo": "https://example.invalid/malmo.png" },
+          "total": { "games": 30, "wins": 17, "draws": 4, "loses": 9, "scoredGoals": 50, "receivedGoals": 30 }
+        },
+        {
+          "position": 2,
+          "points": 55,
+          "team": { "id": 502, "name": "Djurgården", "logo": "https://example.invalid/djurgarden.png" },
+          "total": { "games": 30, "wins": 16, "draws": 7, "loses": 7, "scoredGoals": 45, "receivedGoals": 28 }
+        },
+        {
+          "position": 3,
+          "team": { "id": 503, "name": "Hammarby", "logo": "https://example.invalid/hammarby.png" },
+          "points": 52,
+          "total": { "games": 30, "wins": 15, "draws": 7, "loses": 8, "scoredGoals": 40, "receivedGoals": 29 }
+        }
+      ]
+    }
+  ],
+  "league": { "id": 113, "name": "Allsvenskan", "logo": "https://example.invalid/allsvenskan.png", "season": 2025 }
+}

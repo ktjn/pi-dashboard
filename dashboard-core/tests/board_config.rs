@@ -106,6 +106,23 @@ fn rejects_invalid_panel_rotation() {
 }
 
 #[test]
+fn rejects_a_highlightly_competition_missing_its_numeric_league_id() {
+    let err = parse_board_config(&fixture("missing_highlightly_league_id.toml")).unwrap_err();
+    assert!(matches!(err, BoardConfigError::Invalid(_)));
+}
+
+#[test]
+fn accepts_a_highlightly_competition_with_its_numeric_league_id() {
+    let config = parse_board_config(&fixture("valid.toml")).expect("valid config must parse");
+    let allsvenskan = config
+        .competitions
+        .iter()
+        .find(|competition| competition.id == "allsvenskan")
+        .expect("allsvenskan competition must be present");
+    assert_eq!(allsvenskan.highlightly_league_id, Some(113));
+}
+
+#[test]
 fn load_board_config_reports_missing_file() {
     let err = load_board_config(Path::new("tests/fixtures/does_not_exist.toml")).unwrap_err();
     assert!(matches!(err, BoardConfigError::Io(_)));

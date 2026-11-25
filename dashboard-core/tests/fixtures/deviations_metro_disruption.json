@@ -1,0 +1,60 @@
+[
+  {
+    "version": 1,
+    "created": "2026-11-24T06:00:00+01:00",
+    "modified": "2026-11-24T06:00:00+01:00",
+    "deviation_case_id": 42,
+    "publish": {
+      "from": "2026-11-24T06:00:00+01:00",
+      "upto": "2026-11-24T23:59:00+01:00"
+    },
+    "priority": {
+      "importance_level": 5,
+      "influence_level": 3,
+      "urgency_level": 2
+    },
+    "message_variants": [
+      {
+        "header": "Driftstörning på blå linjen",
+        "details": "Signalfel orsakar förseningar.",
+        "scope_alias": "T10, T11",
+        "language": "sv"
+      }
+    ],
+    "scope": {
+      "stop_areas": [],
+      "lines": [
+        { "id": 10, "transport_authority": 1, "designation": "10", "transport_mode": "METRO" }
+      ]
+    }
+  },
+  {
+    "version": 1,
+    "created": "2024-01-01T00:00:00+01:00",
+    "modified": "2024-01-01T00:00:00+01:00",
+    "deviation_case_id": 7,
+    "publish": {
+      "from": "2024-01-01T00:00:00+01:00",
+      "upto": "2024-02-01T00:00:00+01:00"
+    },
+    "priority": {
+      "importance_level": 3,
+      "influence_level": 2,
+      "urgency_level": 1
+    },
+    "message_variants": [
+      {
+        "header": "Expired notice",
+        "details": "Should never be surfaced.",
+        "scope_alias": "T10",
+        "language": "sv"
+      }
+    ],
+    "scope": {
+      "stop_areas": [],
+      "lines": [
+        { "id": 10, "transport_authority": 1, "designation": "10", "transport_mode": "METRO" }
+      ]
+    }
+  }
+]

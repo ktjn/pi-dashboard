@@ -4,5 +4,19 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+axum = "0.8.9"
 dashboard-core = { path = "../dashboard-core" }
+jiff = { version = "1.0.3", default-features = false, features = ["std", "tzdb-bundle-always"] }
+jsonwebtoken = { version = "12.0.0", default-features = false, features = ["use_pem", "rust_crypto"] }
 macroquad.workspace = true
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "charset", "form", "http2", "query", "rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+time = "0.3.55"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "time", "net", "sync"] }
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+tokio = { version = "1.54.1", features = ["macros"] }
+tower = { version = "0.5.3", features = ["util"] }
