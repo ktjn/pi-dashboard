@@ -1,4 +1,4 @@
-use dashboard_core::board_config::{BoardConfig, FootballProvider, load_board_config};
+use dashboard_core::board_config::{BoardConfig, FootballProvider, Screensaver, load_board_config};
 use dashboard_core::clock::local_clock;
 use dashboard_core::daylight::daylight_window;
 use dashboard_core::departures::{
@@ -7,11 +7,15 @@ use dashboard_core::departures::{
 };
 use dashboard_core::render::{
     STATION_PANEL_HEIGHT, render_clock_weather_header, render_daylight_strip,
-    render_departures_panel, render_standings_panel,
+    render_departures_panel, render_screensaver_view, render_standings_panel,
 };
 use dashboard_core::schedule::{
-    DisplayPowerControl, NullDisplayPowerControl, is_within_display_window, reconcile,
-    resolved_power,
+    DisplayPowerControl, DisplayState, NullDisplayPowerControl, is_within_display_window,
+    reconcile, resolved_power,
+};
+use dashboard_core::screensaver::{
+    CalendarEvent, CalendarFetchError, CalendarPollState, CalendarSource,
+    evaluate_screensaver_rules, parse_google_calendar_events_response,
 };
 use dashboard_core::standings::{
     HighlightlySeasonSource, StandingsBoard, StandingsFetchError, StandingsRotation, StandingsRow,
@@ -23,11 +27,14 @@ use dashboard_core::weather::{
     parse_open_meteo_response,
 };
 use jiff::civil::Date;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 const WEATHER_REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(15 * 60);
 const WEATHER_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(5);
@@ -45,6 +52,226 @@ const STANDINGS_ROTATION_DEFAULT_INTERVAL_SECONDS: u32 = 15;
 /// of scope for this slice) while staying cheap to poll continuously from a
 /// background thread.
 const DISPLAY_POWER_RECONCILE_INTERVAL: StdDuration = StdDuration::from_secs(60);
+/// Spec's "poll on an interval short enough to catch event start/end within
+/// about a minute."
+const CALENDAR_POLL_INTERVAL: StdDuration = StdDuration::from_secs(60);
+const CALENDAR_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+const CALENDAR_TOKEN_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+const CALENDAR_TOKEN_LIFETIME_SECONDS: i64 = 3600;
+/// Refreshes the cached access token a little before Google's own
+/// `expires_in` elapses, so a slow request never straddles the actual
+/// expiry.
+const CALENDAR_TOKEN_REFRESH_SKEW_SECONDS: i64 = 30;
+/// `events.list`'s `timeMin`/`timeMax` window, bracketing "now": wide enough
+/// that an event whose start or end straddles the poll instant is never cut
+/// off by the boundary, narrow enough that pagination (`nextPageToken`,
+/// deliberately unimplemented - see PI-07's review) is never needed even on
+/// a busy calendar.
+const CALENDAR_QUERY_WINDOW: time::Duration = time::Duration::hours(1);
+
+/// Deserialized shape of a Google service-account JSON key file (the
+/// credential format Google's console issues) - unverified live, built
+/// from https://developers.google.com/identity/protocols/oauth2/service-account's
+/// documented fields. `token_uri` is present in every real key file,
+/// documented default retained only so a hand-trimmed fixture/key still
+/// parses.
+#[derive(Debug, Deserialize)]
+struct ServiceAccountKey {
+    client_email: String,
+    private_key: String,
+    #[serde(default = "default_token_uri")]
+    token_uri: String,
+}
+
+fn default_token_uri() -> String {
+    "https://oauth2.googleapis.com/token".to_string()
+}
+
+#[derive(Debug, Serialize)]
+struct ServiceAccountClaims<'a> {
+    iss: &'a str,
+    scope: &'a str,
+    aud: &'a str,
+    exp: i64,
+    iat: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    #[serde(default)]
+    expires_in: Option<i64>,
+}
+
+/// Reads the service-account key's file path from the environment variable
+/// named by `board.toml`'s `screensaver.credential_ref` - per the spec,
+/// "provision all provider credentials... separately on the Pi, never in
+/// the repo." Missing/unreadable/malformed credentials fail with a typed
+/// error (surfacing as a held-last-state calendar check, never a panic),
+/// same pattern as `FootballDataStandingsSource`'s API-key handling.
+fn load_service_account_key(credential_ref: &str) -> Result<ServiceAccountKey, CalendarFetchError> {
+    let path = std::env::var(credential_ref)
+        .map_err(|_| CalendarFetchError::MissingData(format!("{credential_ref} is not set")))?;
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|error| CalendarFetchError::MissingData(format!("{path}: {error}")))?;
+    serde_json::from_str(&contents)
+        .map_err(|error| CalendarFetchError::InvalidJson(error.to_string()))
+}
+
+/// Real Google Calendar client: exchanges the service-account key for a
+/// short-lived OAuth2 access token via the documented JWT-bearer flow
+/// (https://developers.google.com/identity/protocols/oauth2/service-account),
+/// then calls `events.list`
+/// (https://developers.google.com/calendar/api/v3/reference/events/list).
+/// Both unverified live - no service-account credential was available in
+/// this environment; built against the documented/example shapes only.
+struct GoogleCalendarSource {
+    client: reqwest::blocking::Client,
+    credential_ref: String,
+    cached_token: Option<(String, OffsetDateTime)>,
+}
+
+impl GoogleCalendarSource {
+    fn new(credential_ref: String) -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(CALENDAR_HTTP_TIMEOUT)
+            .build()
+            .expect("reqwest client must build");
+        Self {
+            client,
+            credential_ref,
+            cached_token: None,
+        }
+    }
+
+    fn access_token(&mut self) -> Result<String, CalendarFetchError> {
+        let now = OffsetDateTime::now_utc();
+        if let Some((token, expires_at)) = &self.cached_token
+            && now < *expires_at
+        {
+            return Ok(token.clone());
+        }
+
+        let key = load_service_account_key(&self.credential_ref)?;
+        let iat = now.unix_timestamp();
+        let claims = ServiceAccountClaims {
+            iss: &key.client_email,
+            scope: CALENDAR_TOKEN_SCOPE,
+            aud: &key.token_uri,
+            exp: iat + CALENDAR_TOKEN_LIFETIME_SECONDS,
+            iat,
+        };
+        let encoding_key =
+            EncodingKey::from_rsa_pem(key.private_key.as_bytes()).map_err(|error| {
+                CalendarFetchError::MissingData(format!("service account private key: {error}"))
+            })?;
+        let assertion =
+            encode(&Header::new(Algorithm::RS256), &claims, &encoding_key).map_err(|error| {
+                CalendarFetchError::MissingData(format!("JWT signing failed: {error}"))
+            })?;
+
+        let body = self
+            .client
+            .post(&key.token_uri)
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+                ("assertion", assertion.as_str()),
+            ])
+            .send()
+            .map_err(|error| CalendarFetchError::MissingData(error.to_string()))?
+            .text()
+            .map_err(|error| CalendarFetchError::MissingData(error.to_string()))?;
+        let token_response: TokenResponse = serde_json::from_str(&body)
+            .map_err(|error| CalendarFetchError::InvalidJson(error.to_string()))?;
+
+        let expires_in = token_response
+            .expires_in
+            .unwrap_or(CALENDAR_TOKEN_LIFETIME_SECONDS);
+        let expires_at = now + time::Duration::seconds(expires_in)
+            - time::Duration::seconds(CALENDAR_TOKEN_REFRESH_SKEW_SECONDS);
+        self.cached_token = Some((token_response.access_token.clone(), expires_at));
+        Ok(token_response.access_token)
+    }
+}
+
+impl CalendarSource for GoogleCalendarSource {
+    fn fetch_events(
+        &mut self,
+        calendar_id: &str,
+    ) -> Result<Vec<CalendarEvent>, CalendarFetchError> {
+        let token = self.access_token()?;
+        let now = OffsetDateTime::now_utc();
+        let time_min = (now - CALENDAR_QUERY_WINDOW)
+            .format(&Rfc3339)
+            .map_err(|error| CalendarFetchError::MissingData(error.to_string()))?;
+        let time_max = (now + CALENDAR_QUERY_WINDOW)
+            .format(&Rfc3339)
+            .map_err(|error| CalendarFetchError::MissingData(error.to_string()))?;
+        let url = format!("https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events");
+        let body = self
+            .client
+            .get(&url)
+            .bearer_auth(token)
+            // `singleEvents=true` expands a recurring event into its
+            // individual occurrences (default `false` would otherwise
+            // return just the recurring series' first occurrence forever,
+            // so a recurring "Focus" block would never retrigger after its
+            // first occurrence); `orderBy=startTime` requires
+            // `singleEvents=true` and guarantees a stable, chronological
+            // order; `timeMin`/`timeMax` bracket "now" per
+            // `CALENDAR_QUERY_WINDOW` so today's event is always within the
+            // (unpaginated, well under the 250-result default) page
+            // returned. See
+            // https://developers.google.com/calendar/api/v3/reference/events/list.
+            .query(&[
+                ("singleEvents", "true"),
+                ("orderBy", "startTime"),
+                ("timeMin", time_min.as_str()),
+                ("timeMax", time_max.as_str()),
+            ])
+            .send()
+            .map_err(|error| CalendarFetchError::MissingData(error.to_string()))?
+            .text()
+            .map_err(|error| CalendarFetchError::MissingData(error.to_string()))?;
+        parse_google_calendar_events_response(&body)
+    }
+}
+
+/// Polls the configured calendar on a background thread, off the render
+/// loop, same isolation the other `spawn_*_refresh_threads` give their
+/// feeds. The HTTP fetch (`source.fetch_events`, up to ~20s across the
+/// token request plus the events request at `CALENDAR_HTTP_TIMEOUT`) runs
+/// outside the mutex, same pattern as `spawn_weather_refresh_thread` -
+/// `state` is locked only briefly, to record the already-fetched result,
+/// so the render loop and the power-reconciliation thread (which both lock
+/// it every frame/tick) never block on the network call. Only logs the
+/// resulting activation boolean and, on failure, the fetch error's
+/// `Display` output - `calendar-event-cache` is classified `confidential`
+/// in `spec.yaml`, so event titles never reach stderr.
+fn spawn_screensaver_poll_thread(screensaver: Screensaver, state: Arc<Mutex<CalendarPollState>>) {
+    std::thread::spawn(move || {
+        let mut source = GoogleCalendarSource::new(screensaver.credential_ref.clone());
+        loop {
+            let now_utc = OffsetDateTime::now_utc();
+            let active = match source.fetch_events(&screensaver.calendar_id) {
+                Ok(events) => {
+                    let active = evaluate_screensaver_rules(&screensaver.rules, &events, now_utc);
+                    let mut guard = state.lock().expect("calendar poll state mutex poisoned");
+                    guard.record_success(active, now_utc);
+                    guard.screensaver_active()
+                }
+                Err(error) => {
+                    eprintln!("calendar fetch failed: {error}");
+                    let mut guard = state.lock().expect("calendar poll state mutex poisoned");
+                    guard.record_failure();
+                    guard.screensaver_active()
+                }
+            };
+            eprintln!("calendar check: screensaver active: {active}");
+            std::thread::sleep(CALENDAR_POLL_INTERVAL);
+        }
+    });
+}
 
 struct OpenMeteoWeatherSource {
     client: reqwest::blocking::Client,
@@ -391,15 +618,19 @@ fn spawn_standings_refresh_threads(board_config: &BoardConfig, board: Arc<Mutex<
 
 /// Reconciles display power on a background thread, off the render loop,
 /// same isolation the other `spawn_*_refresh_threads` give their feeds.
-/// `override_active`/`screensaver_active` have no real trigger yet (PI-08's
-/// override file, PI-07's calendar poll) - this loop already reads them as
-/// a fixed snapshot per tick and passes that single snapshot into
-/// `reconcile`, so wiring in the real sources later is a read at the top of
-/// this loop, not a reshape of the reconciliation call itself. Only calls
+/// `override_active` has no real trigger yet (PI-08's override file) - this
+/// loop already reads it as a fixed snapshot per tick and passes that
+/// single snapshot into `reconcile`, so wiring in the real source later is
+/// a read at the top of this loop, not a reshape of the reconciliation
+/// call itself. `screensaver_active` is read from the same
+/// `CalendarPollState` the render loop reads, so both sides of the
+/// standby-overrides-screensaver priority agree on the same snapshot
+/// source (never a literal `false`, now that PI-07 exists). Only calls
 /// `set_power` when the resolved power actually changes, to avoid spamming
 /// the (currently null) backlight backend every tick.
 fn spawn_display_power_reconciliation_thread(
     board_config: &BoardConfig,
+    calendar_poll_state: Arc<Mutex<CalendarPollState>>,
     mut power_control: impl DisplayPowerControl + Send + 'static,
 ) {
     let time_zone = board_config.time_zone.clone();
@@ -409,7 +640,10 @@ fn spawn_display_power_reconciliation_thread(
         loop {
             let now_utc = OffsetDateTime::now_utc();
             let override_active = None;
-            let screensaver_active = false;
+            let screensaver_active = calendar_poll_state
+                .lock()
+                .expect("calendar poll state mutex poisoned")
+                .screensaver_active();
 
             match is_within_display_window(&display_windows, &time_zone, now_utc) {
                 Ok(schedule_says_awake) => {
@@ -441,7 +675,16 @@ async fn main() {
         }
     };
 
-    spawn_display_power_reconciliation_thread(&board_config, NullDisplayPowerControl::new());
+    let calendar_poll_state = Arc::new(Mutex::new(CalendarPollState::new()));
+    if let Some(screensaver) = board_config.screensaver.clone() {
+        spawn_screensaver_poll_thread(screensaver, Arc::clone(&calendar_poll_state));
+    }
+
+    spawn_display_power_reconciliation_thread(
+        &board_config,
+        Arc::clone(&calendar_poll_state),
+        NullDisplayPowerControl::new(),
+    );
 
     let weather_store = Arc::new(Mutex::new(WeatherSnapshotStore::new()));
     let weather_source = OpenMeteoWeatherSource::new(board_config.latitude, board_config.longitude);
@@ -475,6 +718,35 @@ async fn main() {
 
         match local_clock(&board_config.time_zone, now_utc) {
             Ok(clock) => {
+                // Mirrors `spawn_display_power_reconciliation_thread`'s own
+                // `reconcile` call: same inputs, read independently here so
+                // the render loop's "show the screensaver or the normal
+                // layout" decision never depends on the power-reconciler
+                // thread's timing. `override_active` stays `None` until
+                // PI-08 adds the real override file.
+                let screensaver_active = calendar_poll_state
+                    .lock()
+                    .expect("calendar poll state mutex poisoned")
+                    .screensaver_active();
+                let schedule_says_awake = is_within_display_window(
+                    &board_config.display_windows,
+                    &board_config.time_zone,
+                    now_utc,
+                )
+                .inspect_err(|error| eprintln!("display-window evaluation failed: {error}"))
+                .unwrap_or(true);
+                let display_state = reconcile(schedule_says_awake, None, screensaver_active);
+
+                if display_state == DisplayState::Screensaver {
+                    let availability = calendar_poll_state
+                        .lock()
+                        .expect("calendar poll state mutex poisoned")
+                        .availability(now_utc);
+                    render_screensaver_view(&clock, &availability);
+                    macroquad::window::next_frame().await;
+                    continue;
+                }
+
                 let weather_state = weather_store
                     .lock()
                     .expect("weather store mutex poisoned")

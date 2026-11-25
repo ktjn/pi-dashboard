@@ -1,6 +1,7 @@
 use crate::clock::LocalClock;
 use crate::daylight::DaylightWindow;
 use crate::departures::DeparturesPanelState;
+use crate::screensaver::CalendarAvailability;
 use crate::standings::StandingsPanelState;
 use crate::weather::WeatherPanelState;
 
@@ -325,6 +326,58 @@ pub fn render_standings_panel(competition_label: &str, state: &StandingsPanelSta
     }
 }
 
+/// Text content for the screensaver view, factored out of the macroquad
+/// drawing calls for the same reason as the other panels. Per the spec's
+/// resolved decision, v1 content is clock-only (photo rotation deferred);
+/// `availability_note` surfaces the "calendar unavailable" indicator
+/// (point 4 of the PI-07 slice) without flipping the screensaver on/off
+/// state itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreensaverDisplay {
+    pub time_text: String,
+    pub availability_note: Option<String>,
+}
+
+pub fn format_screensaver_view(
+    clock: &LocalClock,
+    availability: &CalendarAvailability,
+) -> ScreensaverDisplay {
+    let time_text = format!("{:02}:{:02}:{:02}", clock.hour, clock.minute, clock.second);
+
+    let availability_note = match availability {
+        CalendarAvailability::Fresh => None,
+        CalendarAvailability::Stale { age } => {
+            Some(format!("calendar unavailable ({}m)", age.whole_minutes()))
+        }
+        CalendarAvailability::Unavailable => Some("calendar unavailable".to_string()),
+    };
+
+    ScreensaverDisplay {
+        time_text,
+        availability_note,
+    }
+}
+
+/// Draws the screensaver's clock-only view, replacing the normal layout
+/// entirely while active. Keep this thin: all text content comes from
+/// `format_screensaver_view`, which is covered by unit tests that don't
+/// need a window.
+pub fn render_screensaver_view(clock: &LocalClock, availability: &CalendarAvailability) {
+    use macroquad::color::{GRAY, WHITE};
+    use macroquad::text::draw_text;
+    use macroquad::window::{screen_height, screen_width};
+
+    let display = format_screensaver_view(clock, availability);
+
+    let center_x = screen_width() / 2.0 - 120.0;
+    let center_y = screen_height() / 2.0;
+    draw_text(&display.time_text, center_x, center_y, 80.0, WHITE);
+
+    if let Some(note) = &display.availability_note {
+        draw_text(note, 20.0, screen_height() - 20.0, 22.0, GRAY);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,5 +635,35 @@ mod tests {
         let display = format_standings_panel("allsvenskan", &StandingsPanelState::Unavailable);
         assert_eq!(display.header, "allsvenskan");
         assert_eq!(display.lines, vec!["standings unavailable".to_string()]);
+    }
+
+    #[test]
+    fn screensaver_view_shows_the_clock_with_no_note_when_the_calendar_check_is_fresh() {
+        let display = format_screensaver_view(&clock(), &CalendarAvailability::Fresh);
+        assert_eq!(display.time_text, "21:30:15");
+        assert_eq!(display.availability_note, None);
+    }
+
+    #[test]
+    fn screensaver_view_surfaces_an_unobtrusive_unavailable_note_without_a_calendar_check_yet() {
+        let display = format_screensaver_view(&clock(), &CalendarAvailability::Unavailable);
+        assert_eq!(
+            display.availability_note,
+            Some("calendar unavailable".to_string())
+        );
+    }
+
+    #[test]
+    fn screensaver_view_surfaces_a_stale_note_with_its_age() {
+        let display = format_screensaver_view(
+            &clock(),
+            &CalendarAvailability::Stale {
+                age: Duration::minutes(12),
+            },
+        );
+        assert_eq!(
+            display.availability_note,
+            Some("calendar unavailable (12m)".to_string())
+        );
     }
 }

@@ -4,5 +4,6 @@ pub mod daylight;
 pub mod departures;
 pub mod render;
 pub mod schedule;
+pub mod screensaver;
 pub mod standings;
 pub mod weather;
