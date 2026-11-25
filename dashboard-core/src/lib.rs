@@ -6,4 +6,5 @@ pub mod render;
 pub mod schedule;
 pub mod screensaver;
 pub mod standings;
+pub mod theme;
 pub mod weather;

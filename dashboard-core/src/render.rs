@@ -3,6 +3,7 @@ use crate::daylight::DaylightWindow;
 use crate::departures::DeparturesPanelState;
 use crate::screensaver::CalendarAvailability;
 use crate::standings::StandingsPanelState;
+use crate::theme::{Theme, palette};
 use crate::weather::WeatherPanelState;
 
 /// Text content for the clock + weather header, factored out of the
@@ -43,23 +44,53 @@ pub fn format_clock_weather_header(
 /// Draws the clock + weather header. Keep this thin: all text content
 /// comes from `format_clock_weather_header`, which is covered by unit
 /// tests that don't need a window.
-pub fn render_clock_weather_header(clock: &LocalClock, weather_state: &WeatherPanelState) {
-    use macroquad::color::{BLACK, GRAY, ORANGE, WHITE};
-    use macroquad::shapes::draw_rectangle;
-    use macroquad::text::draw_text;
+pub fn render_clock_weather_header(
+    clock: &LocalClock,
+    weather_state: &WeatherPanelState,
+    theme: &Theme,
+) {
+    use macroquad::shapes::{draw_line, draw_rectangle};
+    use macroquad::text::{TextParams, draw_text_ex, measure_text};
     use macroquad::window::screen_width;
+
+    const TIME_FONT_SIZE: u16 = 40;
+    const WEATHER_GAP: f32 = 32.0;
 
     let display = format_clock_weather_header(clock, weather_state);
 
-    draw_rectangle(0.0, 0.0, screen_width(), 80.0, BLACK);
-    draw_text(&display.time_text, 20.0, 50.0, 40.0, WHITE);
+    draw_rectangle(0.0, 0.0, screen_width(), 80.0, palette::PANEL);
+    draw_line(0.0, 80.0, screen_width(), 80.0, 1.0, palette::RULE);
+
+    draw_text_ex(
+        &display.time_text,
+        20.0,
+        52.0,
+        TextParams {
+            font: Some(theme.mono),
+            font_size: TIME_FONT_SIZE,
+            color: palette::TEXT,
+            ..Default::default()
+        },
+    );
+
+    let time_width = measure_text(&display.time_text, Some(theme.mono), TIME_FONT_SIZE, 1.0).width;
 
     let weather_color = match weather_state {
-        WeatherPanelState::Fresh { .. } => WHITE,
-        WeatherPanelState::Stale { .. } => ORANGE,
-        WeatherPanelState::Unavailable => GRAY,
+        WeatherPanelState::Fresh { .. } => palette::TEXT,
+        WeatherPanelState::Stale { .. } => palette::STALE,
+        WeatherPanelState::Unavailable => palette::DOWN,
     };
-    draw_text(&display.weather_text, 220.0, 50.0, 40.0, weather_color);
+    draw_text_ex(
+        &display.weather_text,
+        20.0 + time_width + WEATHER_GAP,
+        52.0,
+        TextParams {
+            font: Some(theme.sans),
+            font_size: 32,
+            color: weather_color,
+            ..Default::default()
+        },
+    );
 }
 
 /// Text content for the daylight strip, factored out of the macroquad
@@ -95,10 +126,9 @@ pub fn format_daylight_strip(window: &DaylightWindow) -> DaylightStripDisplay {
 /// Draws the daylight strip. Keep this thin: all text content comes from
 /// `format_daylight_strip`, which is covered by unit tests that don't need
 /// a window.
-pub fn render_daylight_strip(window: &DaylightWindow) {
-    use macroquad::color::{DARKGRAY, WHITE};
-    use macroquad::shapes::draw_rectangle;
-    use macroquad::text::draw_text;
+pub fn render_daylight_strip(window: &DaylightWindow, theme: &Theme) {
+    use macroquad::shapes::{draw_line, draw_rectangle};
+    use macroquad::text::{TextParams, draw_text_ex};
     use macroquad::window::screen_width;
 
     const STRIP_Y: f32 = 80.0;
@@ -106,7 +136,15 @@ pub fn render_daylight_strip(window: &DaylightWindow) {
 
     let display = format_daylight_strip(window);
 
-    draw_rectangle(0.0, STRIP_Y, screen_width(), STRIP_HEIGHT, DARKGRAY);
+    draw_rectangle(0.0, STRIP_Y, screen_width(), STRIP_HEIGHT, palette::PANEL);
+    draw_line(
+        0.0,
+        STRIP_Y + STRIP_HEIGHT,
+        screen_width(),
+        STRIP_Y + STRIP_HEIGHT,
+        1.0,
+        palette::RULE,
+    );
     let text = format!(
         "Dawn {}  Sunrise {}  Sunset {}  Dusk {}  ({})",
         display.civil_dawn_text,
@@ -115,7 +153,17 @@ pub fn render_daylight_strip(window: &DaylightWindow) {
         display.civil_dusk_text,
         display.duration_text
     );
-    draw_text(&text, 20.0, STRIP_Y + 28.0, 24.0, WHITE);
+    draw_text_ex(
+        &text,
+        20.0,
+        STRIP_Y + 28.0,
+        TextParams {
+            font: Some(theme.mono),
+            font_size: 22,
+            color: palette::TEXT,
+            ..Default::default()
+        },
+    );
 }
 
 /// One formatted line per departure, factored out of the macroquad drawing
@@ -200,9 +248,10 @@ pub const STATION_PANEL_HEIGHT: f32 = 260.0;
 /// Draws the departures panel. Keep this thin: all text content comes from
 /// `format_departures_panel`, which is covered by unit tests that don't
 /// need a window.
-pub fn render_departures_panel(state: &DeparturesPanelState, top: f32) {
-    use macroquad::color::{GRAY, ORANGE, WHITE};
-    use macroquad::text::draw_text;
+pub fn render_departures_panel(state: &DeparturesPanelState, top: f32, theme: &Theme) {
+    use macroquad::shapes::draw_line;
+    use macroquad::text::{TextParams, draw_text_ex};
+    use macroquad::window::screen_width;
 
     const LINE_HEIGHT: f32 = 32.0;
 
@@ -210,19 +259,41 @@ pub fn render_departures_panel(state: &DeparturesPanelState, top: f32) {
 
     let mut y = top + 24.0;
     if let Some(note) = &display.stale_note {
-        draw_text(note, 20.0, y, 22.0, ORANGE);
+        draw_text_ex(
+            note,
+            20.0,
+            y,
+            TextParams {
+                font: Some(theme.sans),
+                font_size: 22,
+                color: palette::STALE,
+                ..Default::default()
+            },
+        );
         y += LINE_HEIGHT;
     }
 
     let color = match state {
-        DeparturesPanelState::Fresh(_) => WHITE,
-        DeparturesPanelState::Stale { .. } => ORANGE,
-        DeparturesPanelState::Unavailable => GRAY,
+        DeparturesPanelState::Fresh(_) => palette::TEXT,
+        DeparturesPanelState::Stale { .. } => palette::STALE,
+        DeparturesPanelState::Unavailable => palette::DOWN,
     };
 
     for line in &display.lines {
-        draw_text(line, 20.0, y, 28.0, color);
-        y += LINE_HEIGHT;
+        draw_text_ex(
+            line,
+            20.0,
+            y,
+            TextParams {
+                font: Some(theme.mono),
+                font_size: 26,
+                color,
+                ..Default::default()
+            },
+        );
+        y += LINE_HEIGHT * 0.6;
+        draw_line(20.0, y, screen_width() - 20.0, y, 1.0, palette::RULE);
+        y += LINE_HEIGHT * 0.4;
     }
 }
 
@@ -297,32 +368,70 @@ pub fn format_standings_panel(
 /// Draws the currently-rotated competition's standings panel. Keep this
 /// thin: all text content comes from `format_standings_panel`, which is
 /// covered by unit tests that don't need a window.
-pub fn render_standings_panel(competition_label: &str, state: &StandingsPanelState, top: f32) {
-    use macroquad::color::{GRAY, ORANGE, WHITE};
-    use macroquad::text::draw_text;
+pub fn render_standings_panel(
+    competition_label: &str,
+    state: &StandingsPanelState,
+    top: f32,
+    theme: &Theme,
+) {
+    use macroquad::shapes::draw_line;
+    use macroquad::text::{TextParams, draw_text_ex};
+    use macroquad::window::screen_width;
 
     const LINE_HEIGHT: f32 = 28.0;
 
     let display = format_standings_panel(competition_label, state);
 
     let color = match state {
-        StandingsPanelState::Fresh(_) => WHITE,
-        StandingsPanelState::Stale { .. } => ORANGE,
-        StandingsPanelState::Unavailable => GRAY,
+        StandingsPanelState::Fresh(_) => palette::TEXT,
+        StandingsPanelState::Stale { .. } => palette::STALE,
+        StandingsPanelState::Unavailable => palette::DOWN,
     };
 
     let mut y = top + 24.0;
-    draw_text(&display.header, 20.0, y, 26.0, color);
+    draw_text_ex(
+        &display.header,
+        20.0,
+        y,
+        TextParams {
+            font: Some(theme.sans),
+            font_size: 26,
+            color,
+            ..Default::default()
+        },
+    );
     y += LINE_HEIGHT;
 
     if let Some(note) = &display.stale_note {
-        draw_text(note, 20.0, y, 20.0, ORANGE);
+        draw_text_ex(
+            note,
+            20.0,
+            y,
+            TextParams {
+                font: Some(theme.sans),
+                font_size: 20,
+                color: palette::STALE,
+                ..Default::default()
+            },
+        );
         y += LINE_HEIGHT;
     }
 
     for line in &display.lines {
-        draw_text(line, 20.0, y, 24.0, color);
-        y += LINE_HEIGHT;
+        draw_text_ex(
+            line,
+            20.0,
+            y,
+            TextParams {
+                font: Some(theme.mono),
+                font_size: 22,
+                color,
+                ..Default::default()
+            },
+        );
+        y += LINE_HEIGHT * 0.6;
+        draw_line(20.0, y, screen_width() - 20.0, y, 1.0, palette::RULE);
+        y += LINE_HEIGHT * 0.4;
     }
 }
 
@@ -362,19 +471,45 @@ pub fn format_screensaver_view(
 /// entirely while active. Keep this thin: all text content comes from
 /// `format_screensaver_view`, which is covered by unit tests that don't
 /// need a window.
-pub fn render_screensaver_view(clock: &LocalClock, availability: &CalendarAvailability) {
-    use macroquad::color::{GRAY, WHITE};
-    use macroquad::text::draw_text;
+pub fn render_screensaver_view(
+    clock: &LocalClock,
+    availability: &CalendarAvailability,
+    theme: &Theme,
+) {
+    use macroquad::shapes::draw_rectangle;
+    use macroquad::text::{TextParams, draw_text_ex};
     use macroquad::window::{screen_height, screen_width};
 
     let display = format_screensaver_view(clock, availability);
 
+    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), palette::INK);
+
     let center_x = screen_width() / 2.0 - 120.0;
     let center_y = screen_height() / 2.0;
-    draw_text(&display.time_text, center_x, center_y, 80.0, WHITE);
+    draw_text_ex(
+        &display.time_text,
+        center_x,
+        center_y,
+        TextParams {
+            font: Some(theme.mono),
+            font_size: 80,
+            color: palette::TEXT,
+            ..Default::default()
+        },
+    );
 
     if let Some(note) = &display.availability_note {
-        draw_text(note, 20.0, screen_height() - 20.0, 22.0, GRAY);
+        draw_text_ex(
+            note,
+            20.0,
+            screen_height() - 20.0,
+            TextParams {
+                font: Some(theme.sans),
+                font_size: 22,
+                color: palette::MUTED,
+                ..Default::default()
+            },
+        );
     }
 }
 

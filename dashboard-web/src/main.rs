@@ -17,6 +17,7 @@ use dashboard_core::standings::{
     FixtureStandingsSource, STANDINGS_STALE_AFTER, StandingsBoard, StandingsRotation, StandingsRow,
     StandingsSource,
 };
+use dashboard_core::theme::{Theme, load_fonts, palette};
 use dashboard_core::weather::{
     FixtureWeatherSource, WEATHER_STALE_AFTER, WeatherReading, WeatherSnapshotStore, WeatherSource,
 };
@@ -336,6 +337,12 @@ fn refresh_fixture_calendar(
 async fn main() {
     // Fixture data in place of a real provider - the playground never
     // talks to a real network.
+    let (mono_font, sans_font) = load_fonts().expect("vendored fonts must load");
+    let theme = Theme {
+        mono: &mono_font,
+        sans: &sans_font,
+    };
+
     let base_utc = datetime!(2026-11-24 20:00:00 UTC);
     let start_time = macroquad::time::get_time();
 
@@ -473,7 +480,7 @@ async fn main() {
             last_calendar_refresh = now_utc;
         }
 
-        macroquad::window::clear_background(macroquad::color::BLACK);
+        macroquad::window::clear_background(palette::INK);
 
         let clock = local_clock(STOCKHOLM_TZ, now_utc).expect("time zone must resolve");
 
@@ -482,13 +489,13 @@ async fn main() {
         // `reconcile` call `dashboard-pi` uses.
         let display_state = reconcile(true, None, calendar_poll_state.screensaver_active());
         if display_state == DisplayState::Screensaver {
-            render_screensaver_view(&clock, &calendar_poll_state.availability(now_utc));
+            render_screensaver_view(&clock, &calendar_poll_state.availability(now_utc), &theme);
             macroquad::window::next_frame().await;
             continue;
         }
 
         let weather_state = weather_store.state(now_utc);
-        render_clock_weather_header(&clock, &weather_state);
+        render_clock_weather_header(&clock, &weather_state, &theme);
 
         let today = Date::new(clock.year, clock.month as i8, clock.day as i8)
             .expect("local clock must yield a valid calendar date");
@@ -497,19 +504,19 @@ async fn main() {
             daylight_date = Some(today);
         }
         if let Some(window) = &daylight {
-            render_daylight_strip(window);
+            render_daylight_strip(window, &theme);
         }
 
         let mut panel_top = 140.0;
         for station in &stations {
             let departures_state = departures_board.station_state(station, now_utc);
-            render_departures_panel(&departures_state, panel_top);
+            render_departures_panel(&departures_state, panel_top, &theme);
             panel_top += STATION_PANEL_HEIGHT;
         }
 
         let active_competition_id = standings_rotation.active_competition(now_utc);
         let standings_state = standings_board.competition_state(active_competition_id, now_utc);
-        render_standings_panel(active_competition_id, &standings_state, panel_top);
+        render_standings_panel(active_competition_id, &standings_state, panel_top, &theme);
 
         macroquad::window::next_frame().await;
     }
