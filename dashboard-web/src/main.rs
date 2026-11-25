@@ -2,8 +2,8 @@ use dashboard_core::board_config::{MatchType, ScreensaverRule, Station, TransitM
 use dashboard_core::clock::local_clock;
 use dashboard_core::daylight::daylight_window;
 use dashboard_core::departures::{
-    DeparturesBoard, DeparturesSource, DeviationsSource, FixtureDeparturesSource,
-    FixtureDeviationsSource, RawDeparture,
+    DEPARTURES_STALE_AFTER, DeparturesBoard, DeparturesSource, DeviationsSource,
+    FixtureDeparturesSource, FixtureDeviationsSource, RawDeparture,
 };
 use dashboard_core::render::{
     STATION_PANEL_HEIGHT, render_clock_weather_header, render_daylight_strip,
@@ -14,10 +14,11 @@ use dashboard_core::screensaver::{
     CalendarEvent, CalendarPollState, FixtureCalendarSource, poll_calendar,
 };
 use dashboard_core::standings::{
-    FixtureStandingsSource, StandingsBoard, StandingsRotation, StandingsRow, StandingsSource,
+    FixtureStandingsSource, STANDINGS_STALE_AFTER, StandingsBoard, StandingsRotation, StandingsRow,
+    StandingsSource,
 };
 use dashboard_core::weather::{
-    FixtureWeatherSource, WeatherReading, WeatherSnapshotStore, WeatherSource,
+    FixtureWeatherSource, WEATHER_STALE_AFTER, WeatherReading, WeatherSnapshotStore, WeatherSource,
 };
 use jiff::civil::Date;
 use std::collections::HashMap;
@@ -56,6 +57,75 @@ const PLAYGROUND_DEPARTURES_REFRESH_INTERVAL: Duration = Duration::seconds(30);
 /// weather panel silently goes permanently Stale then Unavailable within
 /// minutes of being opened.
 const PLAYGROUND_WEATHER_REFRESH_INTERVAL: Duration = Duration::minutes(10);
+
+/// Same reasoning again, applied to the standings fixture - without a
+/// periodic refresh here, `StandingsBoard` would only ever hold its
+/// one-time startup snapshot and never demonstrate ongoing normal
+/// operation.
+const PLAYGROUND_STANDINGS_REFRESH_INTERVAL: Duration = Duration::minutes(5);
+
+/// Phase 7 step 1 asks for fixture coverage of each panel's
+/// normal/stale/unavailable states, not just "Fresh". Departures' (2 min),
+/// weather's (20 min) and standings' (2h) real staleness thresholds are
+/// too long to wait out live in a playground session, so instead of
+/// literally waiting, each of those three panels is scripted through a
+/// short, shared timeline that repeats every `DEMO_CYCLE_LENGTH` (so a
+/// viewer who leaves the playground open keeps seeing every state rather
+/// than settling into a permanent `Fresh` after one pass):
+///
+/// - `[0, DEMO_UNAVAILABLE_UNTIL)`: no fetch has been attempted yet (or
+///   has been attempted since the current cycle started), so each
+///   panel's board/store is empty and genuinely reports `Unavailable` -
+///   the same state a real cold boot before the first successful fetch
+///   would show.
+/// - `[DEMO_UNAVAILABLE_UNTIL, DEMO_STALE_FROM)` and everything from
+///   `DEMO_STALE_UNTIL` to `DEMO_CYCLE_LENGTH`: `Fresh`, refreshed
+///   periodically per panel exactly as before this phase scripting was
+///   added.
+/// - `[DEMO_STALE_FROM, DEMO_STALE_UNTIL)`: each panel records one fetch
+///   whose own `fetched_at`/`observed_at` is already older than that
+///   panel's real staleness threshold - the same age computation a
+///   provider outage would hit - without needing to wait out the real
+///   threshold.
+///
+/// The screensaver's fixture calendar event (see `fixture_calendar_events`)
+/// is active for `[DEMO_SCREENSAVER_FROM, DEMO_SCREENSAVER_UNTIL)` of the
+/// same cycle. `DEMO_STALE_FROM`/`DEMO_STALE_UNTIL` are placed with a
+/// comfortable margin after `DEMO_SCREENSAVER_UNTIL` - the screensaver
+/// view fully masks every panel (`reconcile` returns `Screensaver` and the
+/// render loop draws the screensaver and `continue`s before any panel
+/// renders), so a Stale window that overlapped it would never actually be
+/// visible to a viewer. The two windows must never overlap or be placed
+/// adjacent with no buffer, since poll-timing jitter near a shared
+/// boundary could make the Stale state flaky to observe.
+///
+/// The daylight panel has no such states: it is a pure local calculation
+/// with no network dependency, so it is intentionally left out of this
+/// scripting and always renders `Fresh`-equivalent (correct) values for
+/// the real local date.
+const DEMO_UNAVAILABLE_UNTIL: Duration = Duration::seconds(10);
+const DEMO_SCREENSAVER_FROM: Duration = Duration::seconds(60);
+const DEMO_SCREENSAVER_UNTIL: Duration = Duration::seconds(180);
+const DEMO_STALE_FROM: Duration = Duration::seconds(200);
+const DEMO_STALE_UNTIL: Duration = Duration::seconds(215);
+const DEMO_CYCLE_LENGTH: Duration = Duration::seconds(240);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DemoPhase {
+    Unavailable,
+    Fresh,
+    Stale,
+}
+
+fn demo_phase(elapsed_since_start: Duration) -> DemoPhase {
+    if elapsed_since_start < DEMO_UNAVAILABLE_UNTIL {
+        DemoPhase::Unavailable
+    } else if elapsed_since_start >= DEMO_STALE_FROM && elapsed_since_start < DEMO_STALE_UNTIL {
+        DemoPhase::Stale
+    } else {
+        DemoPhase::Fresh
+    }
+}
 
 /// Fixture departures for the playground: no real network, mirrors the
 /// `board.toml` default Duvbo station. Timestamps are generated relative
@@ -100,17 +170,32 @@ fn fixture_sundbyberg_departures(now: time::OffsetDateTime) -> Vec<RawDeparture>
 /// `DeparturesSource`/`record_departures_success` path the real
 /// `dashboard-pi` refresh threads use, rather than poking `RawDeparture`
 /// values into the board directly.
-fn refresh_fixture_departures(board: &mut DeparturesBoard, now: time::OffsetDateTime) {
+///
+/// `generation_time` and `fetched_at` are deliberately separate: departure
+/// times are always generated relative to `generation_time` (so they stay
+/// sensibly in the future), while `fetched_at` is what
+/// `DeparturesPanelState`'s staleness check actually ages against - letting
+/// the demo-stale window (see `DEMO_STALE_FROM`) record a fetch that
+/// *claims* to be older than `DEPARTURES_STALE_AFTER` without the cached
+/// departures themselves looking already-elapsed.
+fn refresh_fixture_departures(
+    board: &mut DeparturesBoard,
+    generation_time: time::OffsetDateTime,
+    fetched_at: time::OffsetDateTime,
+) {
     let mut departures_responses = HashMap::new();
-    departures_responses.insert(DUVBO_SITE_ID, Ok(fixture_duvbo_departures(now)));
-    departures_responses.insert(SUNDBYBERG_SITE_ID, Ok(fixture_sundbyberg_departures(now)));
+    departures_responses.insert(DUVBO_SITE_ID, Ok(fixture_duvbo_departures(generation_time)));
+    departures_responses.insert(
+        SUNDBYBERG_SITE_ID,
+        Ok(fixture_sundbyberg_departures(generation_time)),
+    );
     let mut departures_source = FixtureDeparturesSource::new(departures_responses);
 
     let mut deviations_source = FixtureDeviationsSource::new(HashMap::new());
 
     for site_id in [DUVBO_SITE_ID, SUNDBYBERG_SITE_ID] {
         if let Ok(departures) = departures_source.fetch_departures(site_id) {
-            board.record_departures_success(site_id, departures, now);
+            board.record_departures_success(site_id, departures, fetched_at);
         }
         if let Ok(deviations) = deviations_source.fetch_deviations(site_id) {
             board.record_deviations_success(site_id, deviations);
@@ -118,16 +203,25 @@ fn refresh_fixture_departures(board: &mut DeparturesBoard, now: time::OffsetDate
     }
 }
 
-/// Refreshes the fixture weather reading relative to `now`, through the
-/// same `WeatherSource`/`record_success` path a real provider would use.
-fn refresh_fixture_weather(store: &mut WeatherSnapshotStore, now: time::OffsetDateTime) {
+/// Refreshes the fixture weather reading, through the same
+/// `WeatherSource`/`record_success` path a real provider would use.
+/// `observed_at` and `fetched_at` are deliberately separate - see
+/// `refresh_fixture_departures` above for why; here `observed_at` is what
+/// `WeatherPanelState`'s staleness check ages against, letting the
+/// demo-stale window record a reading that claims an old observation time
+/// without the surrounding fetch failing outright.
+fn refresh_fixture_weather(
+    store: &mut WeatherSnapshotStore,
+    observed_at: time::OffsetDateTime,
+    fetched_at: time::OffsetDateTime,
+) {
     let mut weather_source = FixtureWeatherSource::new(vec![Ok(WeatherReading {
         temp_c: 3.5,
         precip_probability_pct: 20,
-        observed_at: now,
+        observed_at,
     })]);
     if let Ok(reading) = weather_source.fetch() {
-        store.record_success(reading, now);
+        store.record_success(reading, fetched_at);
     }
 }
 
@@ -203,17 +297,21 @@ fn fixture_screensaver_rules() -> Vec<ScreensaverRule> {
     }]
 }
 
-/// One fixture calendar event, active for a two-minute window starting a
-/// minute after the playground opens, so a viewer watching it actually
+/// One fixture calendar event, active for `[DEMO_SCREENSAVER_FROM,
+/// DEMO_SCREENSAVER_UNTIL)` of the current demo cycle (see
+/// `DEMO_CYCLE_LENGTH`'s doc comment), so a viewer watching it actually
 /// sees the screensaver take over and the dashboard return - demonstrating
 /// both halves of PI-07's acceptance check without needing a real
-/// calendar.
-fn fixture_calendar_events(base_utc: time::OffsetDateTime) -> Vec<CalendarEvent> {
+/// calendar. `cycle_start_utc` is the UTC instant the *current* cycle
+/// began (not the playground's fixed startup time), so the event's
+/// absolute window is re-derived every cycle and the screensaver keeps
+/// recurring on each loop instead of only firing once.
+fn fixture_calendar_events(cycle_start_utc: time::OffsetDateTime) -> Vec<CalendarEvent> {
     vec![CalendarEvent {
         event_id: "playground-focus-block".to_string(),
         title: "Focus 14:00-15:00".to_string(),
-        start: base_utc + Duration::minutes(1),
-        end: base_utc + Duration::minutes(3),
+        start: cycle_start_utc + DEMO_SCREENSAVER_FROM,
+        end: cycle_start_utc + DEMO_SCREENSAVER_UNTIL,
     }]
 }
 
@@ -222,13 +320,13 @@ fn fixture_calendar_events(base_utc: time::OffsetDateTime) -> Vec<CalendarEvent>
 fn refresh_fixture_calendar(
     state: &mut CalendarPollState,
     rules: &[ScreensaverRule],
-    base_utc: time::OffsetDateTime,
+    cycle_start_utc: time::OffsetDateTime,
     now: time::OffsetDateTime,
 ) {
     let mut responses = HashMap::new();
     responses.insert(
         SCREENSAVER_CALENDAR_ID.to_string(),
-        Ok(fixture_calendar_events(base_utc)),
+        Ok(fixture_calendar_events(cycle_start_utc)),
     );
     let mut source = FixtureCalendarSource::new(responses);
     poll_calendar(&mut source, SCREENSAVER_CALENDAR_ID, rules, now, state);
@@ -241,16 +339,23 @@ async fn main() {
     let base_utc = datetime!(2026-11-24 20:00:00 UTC);
     let start_time = macroquad::time::get_time();
 
+    // Weather, departures and standings deliberately start empty rather
+    // than eagerly populated: the `DEMO_UNAVAILABLE_UNTIL` window below
+    // relies on each board/store genuinely never having recorded a
+    // success yet, so their panels render `Unavailable` for the first
+    // few seconds the playground is open, same as a real cold boot
+    // before the first successful fetch.
     let mut weather_store = WeatherSnapshotStore::new();
-    refresh_fixture_weather(&mut weather_store, base_utc);
     let mut last_weather_refresh = base_utc;
 
     let mut departures_board = DeparturesBoard::new();
-    refresh_fixture_departures(&mut departures_board, base_utc);
     let mut last_departures_refresh = base_utc;
 
     let mut standings_board = StandingsBoard::new();
-    refresh_fixture_standings(&mut standings_board, base_utc);
+    let mut last_standings_refresh = base_utc;
+
+    let mut last_demo_phase: Option<DemoPhase> = None;
+
     let standings_rotation = StandingsRotation::new(
         vec![ALLSVENSKAN_ID.to_string(), SERIE_A_ID.to_string()],
         STANDINGS_ROTATION_INTERVAL_SECONDS,
@@ -286,23 +391,83 @@ async fn main() {
     let mut daylight_date: Option<Date> = None;
     let mut daylight = None;
 
+    let cycle_length_seconds = DEMO_CYCLE_LENGTH.whole_seconds();
+
     loop {
         let elapsed_seconds = (macroquad::time::get_time() - start_time).max(0.0) as i64;
         let now_utc = base_utc + Duration::seconds(elapsed_seconds);
+        let cycle_index = elapsed_seconds / cycle_length_seconds;
+        let elapsed_in_cycle = elapsed_seconds - cycle_index * cycle_length_seconds;
+        let cycle_start_utc = base_utc + Duration::seconds(cycle_index * cycle_length_seconds);
+        let elapsed_since_start = Duration::seconds(elapsed_in_cycle);
 
-        if now_utc - last_departures_refresh >= PLAYGROUND_DEPARTURES_REFRESH_INTERVAL {
-            refresh_fixture_departures(&mut departures_board, now_utc);
+        let phase = demo_phase(elapsed_since_start);
+        if Some(phase) != last_demo_phase {
+            last_demo_phase = Some(phase);
+            match phase {
+                // Reset every board/store back to empty so repeat cycles
+                // genuinely report `Unavailable` again, rather than still
+                // showing whatever Fresh/Stale data survived from the
+                // previous cycle (the real staleness thresholds are long
+                // enough - departures 2 min, weather 20 min, standings 2h
+                // - that leftover data from moments ago would otherwise
+                // still read as Fresh here).
+                DemoPhase::Unavailable => {
+                    weather_store = WeatherSnapshotStore::new();
+                    departures_board = DeparturesBoard::new();
+                    standings_board = StandingsBoard::new();
+                }
+                DemoPhase::Fresh => {
+                    refresh_fixture_weather(&mut weather_store, now_utc, now_utc);
+                    last_weather_refresh = now_utc;
+                    refresh_fixture_departures(&mut departures_board, now_utc, now_utc);
+                    last_departures_refresh = now_utc;
+                    refresh_fixture_standings(&mut standings_board, now_utc);
+                    last_standings_refresh = now_utc;
+                }
+                DemoPhase::Stale => {
+                    // Each fetch claims a timestamp already older than
+                    // that panel's own real staleness threshold, so the
+                    // panel reports `Stale` immediately rather than
+                    // after literally waiting out the threshold.
+                    let weather_observed_at = now_utc - WEATHER_STALE_AFTER - Duration::minutes(5);
+                    refresh_fixture_weather(&mut weather_store, weather_observed_at, now_utc);
+                    let departures_fetched_at =
+                        now_utc - DEPARTURES_STALE_AFTER - Duration::minutes(1);
+                    refresh_fixture_departures(
+                        &mut departures_board,
+                        now_utc,
+                        departures_fetched_at,
+                    );
+                    let standings_fetched_at = now_utc - STANDINGS_STALE_AFTER - Duration::hours(1);
+                    refresh_fixture_standings(&mut standings_board, standings_fetched_at);
+                }
+            }
+        }
+
+        if phase == DemoPhase::Fresh
+            && now_utc - last_departures_refresh >= PLAYGROUND_DEPARTURES_REFRESH_INTERVAL
+        {
+            refresh_fixture_departures(&mut departures_board, now_utc, now_utc);
             last_departures_refresh = now_utc;
         }
-        if now_utc - last_weather_refresh >= PLAYGROUND_WEATHER_REFRESH_INTERVAL {
-            refresh_fixture_weather(&mut weather_store, now_utc);
+        if phase == DemoPhase::Fresh
+            && now_utc - last_weather_refresh >= PLAYGROUND_WEATHER_REFRESH_INTERVAL
+        {
+            refresh_fixture_weather(&mut weather_store, now_utc, now_utc);
             last_weather_refresh = now_utc;
+        }
+        if phase == DemoPhase::Fresh
+            && now_utc - last_standings_refresh >= PLAYGROUND_STANDINGS_REFRESH_INTERVAL
+        {
+            refresh_fixture_standings(&mut standings_board, now_utc);
+            last_standings_refresh = now_utc;
         }
         if now_utc - last_calendar_refresh >= PLAYGROUND_CALENDAR_POLL_INTERVAL {
             refresh_fixture_calendar(
                 &mut calendar_poll_state,
                 &screensaver_rules,
-                base_utc,
+                cycle_start_utc,
                 now_utc,
             );
             last_calendar_refresh = now_utc;

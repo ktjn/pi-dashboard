@@ -67,6 +67,13 @@ capabilities:
     invariants: [override_expires_at_next_schedule_boundary]
     failure_modes: [invalid_token, override_file_write_failed]
     interface: { operation: POST /control, request: override-request, response: status-report, idempotent: true, auth: bearer-token, errors: { invalid_token: 401, override_file_write_failed: 500 } }
+  - id: preview-playground
+    version: "0.1"
+    status: specified
+    preconditions: [fixture_data_available]
+    postconditions: [playground_deployed]
+    invariants: [no_real_credentials_required]
+    failure_modes: [deploy_failed]
 
 components:
   - id: dashboard-core
@@ -118,6 +125,15 @@ components:
     owns_data: [release-bundle]
     source_paths: [.github/workflows/ci.yml]
     formal_assessment: { applies: false, rationale: "Sequential download/verify/swap/rollback on one device; no concurrency or distributed-state between nodes." }
+  - id: pages-playground
+    version: "0.1"
+    status: specified
+    layer: presentation
+    owner: homelab
+    provides: [preview-playground]
+    owns_data: []
+    source_paths: [.github/workflows/pages.yml, dashboard-web/src, dashboard-web/web]
+    formal_assessment: { applies: false, rationale: "Static fixture-driven demo build with a scripted timeline; no concurrency, external credentials, or safety-critical behavior." }
 
 data_models:
   - id: departure
@@ -196,6 +212,7 @@ requirements:
   - { id: req-remote-control-security, version: "0.1", status: specified, category: security, kind: non-functional, target: remote-screen-control, criteria: ["the control endpoint rejects any request without a valid bearer token", "the token is provisioned outside the repository, never committed"] }
   - { id: req-remote-control-observability, version: "0.1", status: specified, category: observability, kind: non-functional, target: remote-screen-control, criteria: ["status reports distinguish normal, scheduled-standby, manual-override and screensaver states", "status reports include per-panel data freshness, uptime and deployed version"] }
   - { id: req-ci-validates-release, version: "0.1", status: specified, category: contract, target: deploy-release, criteria: ["a release is only cut from a push that passed board.toml validation, the full test suite, and clippy with no warnings", "a published release includes a verifiable digest for its bundle"] }
+  - { id: req-playground-deploy, version: "0.1", status: specified, category: functional, target: preview-playground, criteria: ["pushing to main updates the live Pages URL within the workflow's run time", "the playground never requires or references real credentials"] }
 
 evidence:
   - { id: ev-dashboard-core-tests-board_config-rs-error_messages_are_descriptive, requirement_id: req-board-toml-serialization, requirement_version: "0.1", method: test, passed: true, provenance: "dashboard-core/tests/board_config.rs::error_messages_are_descriptive", subject_revision: "0.1", timestamp: 2026-11-24, verifier: ci }
