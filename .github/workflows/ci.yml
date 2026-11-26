@@ -26,6 +26,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - run: cargo run -p dashboard-core --bin validate_board_config -- board.toml
+
       - run: cargo build --workspace --all-targets
 
   release:
@@ -42,6 +44,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
 
       - uses: Swatinem/rust-cache@v2
+
+      - run: cargo run -p dashboard-core --bin validate_board_config -- board.toml
 
       - run: cargo install cross --locked
 
