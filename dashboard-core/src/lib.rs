@@ -7,4 +7,5 @@ pub mod schedule;
 pub mod screensaver;
 pub mod standings;
 pub mod theme;
+pub mod touch;
 pub mod weather;

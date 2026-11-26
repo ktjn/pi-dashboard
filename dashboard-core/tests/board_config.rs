@@ -1,4 +1,5 @@
 use dashboard_core::board_config::{BoardConfigError, load_board_config, parse_board_config};
+use dashboard_core::touch::TouchConfig;
 use std::path::Path;
 
 fn fixture(name: &str) -> String {
@@ -140,4 +141,34 @@ fn load_board_config_loads_the_real_root_board_toml() {
         .panel_rotation
         .expect("panel_rotation must be present");
     assert_eq!(panel_rotation.panels, vec!["football".to_string()]);
+    let touch = config.touch.expect("touch must be present");
+    assert!(touch.enabled);
+}
+
+#[test]
+fn board_config_without_a_touch_table_treats_touch_as_absent() {
+    let config = parse_board_config(&fixture("valid.toml")).expect("valid config must parse");
+    assert!(config.touch.is_none());
+}
+
+#[test]
+fn touch_config_fills_in_defaults_for_omitted_durations() {
+    let config = parse_board_config(&fixture("touch_minimal.toml")).expect("must parse");
+    let touch = config.touch.expect("touch must be present");
+    assert!(touch.enabled);
+    assert_eq!(touch.wake_seconds, TouchConfig::DEFAULT_WAKE_SECONDS);
+    assert_eq!(
+        touch.screensaver_dismiss_seconds,
+        TouchConfig::DEFAULT_SCREENSAVER_DISMISS_SECONDS
+    );
+    assert_eq!(
+        touch.idle_timeout_seconds,
+        TouchConfig::DEFAULT_IDLE_TIMEOUT_SECONDS
+    );
+}
+
+#[test]
+fn rejects_a_touch_config_with_a_zero_duration() {
+    let err = parse_board_config(&fixture("invalid_touch.toml")).unwrap_err();
+    assert!(matches!(err, BoardConfigError::Invalid(_)));
 }

@@ -62,3 +62,9 @@ match_type = "regex"
 [panel_rotation]
 interval_seconds = 15
 panels = ["football"]
+
+[touch]
+enabled = true
+wake_seconds = 120
+screensaver_dismiss_seconds = 45
+idle_timeout_seconds = 45

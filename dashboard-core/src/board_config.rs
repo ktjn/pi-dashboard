@@ -1,3 +1,4 @@
+use crate::touch::TouchConfig;
 use serde::Deserialize;
 use std::fmt;
 use std::path::Path;
@@ -15,6 +16,7 @@ struct RawBoardConfig {
     display_windows: Vec<RawDisplayWindow>,
     screensaver: Option<RawScreensaver>,
     panel_rotation: Option<RawPanelRotation>,
+    touch: Option<RawTouch>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +72,17 @@ struct RawPanelRotation {
     interval_seconds: u32,
     #[serde(default)]
     panels: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTouch {
+    enabled: bool,
+    #[serde(default)]
+    wake_seconds: Option<u32>,
+    #[serde(default)]
+    screensaver_dismiss_seconds: Option<u32>,
+    #[serde(default)]
+    idle_timeout_seconds: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +234,7 @@ pub struct BoardConfig {
     pub display_windows: Vec<DisplayWindow>,
     pub screensaver: Option<Screensaver>,
     pub panel_rotation: Option<PanelRotation>,
+    pub touch: Option<TouchConfig>,
 }
 
 #[derive(Debug)]
@@ -405,6 +419,40 @@ fn validate(raw: RawBoardConfig) -> Result<BoardConfig, BoardConfigError> {
         None => None,
     };
 
+    let touch = match raw.touch {
+        Some(touch) => {
+            let wake_seconds = touch.wake_seconds.unwrap_or(TouchConfig::DEFAULT_WAKE_SECONDS);
+            let screensaver_dismiss_seconds = touch
+                .screensaver_dismiss_seconds
+                .unwrap_or(TouchConfig::DEFAULT_SCREENSAVER_DISMISS_SECONDS);
+            let idle_timeout_seconds = touch
+                .idle_timeout_seconds
+                .unwrap_or(TouchConfig::DEFAULT_IDLE_TIMEOUT_SECONDS);
+            if wake_seconds == 0 {
+                return Err(BoardConfigError::Invalid(
+                    "touch.wake_seconds: must be greater than 0".to_string(),
+                ));
+            }
+            if screensaver_dismiss_seconds == 0 {
+                return Err(BoardConfigError::Invalid(
+                    "touch.screensaver_dismiss_seconds: must be greater than 0".to_string(),
+                ));
+            }
+            if idle_timeout_seconds == 0 {
+                return Err(BoardConfigError::Invalid(
+                    "touch.idle_timeout_seconds: must be greater than 0".to_string(),
+                ));
+            }
+            Some(TouchConfig {
+                enabled: touch.enabled,
+                wake_seconds,
+                screensaver_dismiss_seconds,
+                idle_timeout_seconds,
+            })
+        }
+        None => None,
+    };
+
     Ok(BoardConfig {
         time_zone: raw.location.time_zone,
         latitude: raw.location.latitude,
@@ -414,6 +462,7 @@ fn validate(raw: RawBoardConfig) -> Result<BoardConfig, BoardConfigError> {
         display_windows,
         screensaver,
         panel_rotation,
+        touch,
     })
 }
 
