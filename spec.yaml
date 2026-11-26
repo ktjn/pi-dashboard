@@ -67,6 +67,13 @@ capabilities:
     invariants: [override_expires_at_next_schedule_boundary]
     failure_modes: [invalid_token, override_file_write_failed]
     interface: { operation: POST /control, request: override-request, response: status-report, idempotent: true, auth: bearer-token, errors: { invalid_token: 401, override_file_write_failed: 500 } }
+  - id: handle-touch-input
+    version: "0.1"
+    status: specified
+    preconditions: [touch_enabled_in_board_toml]
+    postconditions: [touch_state_applied, panel_view_updated]
+    invariants: [touch_never_extends_wake_past_configured_duration, touch_state_reverts_after_idle_timeout, header_tap_has_no_effect]
+    failure_modes: [touch_device_unavailable]
   - id: preview-playground
     version: "0.1"
     status: specified
@@ -116,6 +123,16 @@ components:
     source_paths: [dashboard-pi/src/remote_control.rs]
     test_paths: [dashboard-pi/src/remote_control.rs]
     formal_assessment: { applies: false, rationale: "Single HTTP endpoint on a trusted LAN with a shared-secret token; no distributed-state or safety-critical behavior." }
+  - id: touch-input
+    version: "0.1"
+    status: specified
+    layer: application
+    owner: homelab
+    provides: [handle-touch-input]
+    owns_data: [touch-state]
+    source_paths: [dashboard-core/src/touch.rs]
+    test_paths: [dashboard-core/tests/touch.rs]
+    formal_assessment: { applies: false, rationale: "Pure input-event reducer over local UI state with timeouts; no concurrency beyond the existing override-file race covered by req-override-concurrency, no safety-critical behavior." }
   - id: release-pipeline
     version: "0.1"
     status: specified
@@ -186,6 +203,11 @@ data_models:
     owner: remote-control
     classification: internal
     fields: { state: string, panel_freshness: string, uptime_s: int, version: string }
+  - id: touch-state
+    version: "0.1"
+    owner: touch-input
+    classification: internal
+    fields: { mode: string, wake_until: datetime, screensaver_dismissed_until: datetime, football_index: int, expanded_departure: string, last_input_at: datetime }
   - id: release-bundle
     version: "0.1"
     owner: release-pipeline
@@ -212,6 +234,14 @@ requirements:
   - { id: req-remote-control-security, version: "0.1", status: specified, category: security, kind: non-functional, target: remote-screen-control, criteria: ["the control endpoint rejects any request without a valid bearer token", "the token is provisioned outside the repository, never committed"] }
   - { id: req-remote-control-observability, version: "0.1", status: specified, category: observability, kind: non-functional, target: remote-screen-control, criteria: ["status reports distinguish normal, scheduled-standby, manual-override and screensaver states", "status reports include per-panel data freshness, uptime and deployed version"] }
   - { id: req-ci-validates-release, version: "0.1", status: specified, category: contract, target: deploy-release, criteria: ["a release is only cut from a push that passed board.toml validation, the full test suite, and clippy with no warnings", "a published release includes a verifiable digest for its bundle"] }
+  - { id: req-touch-wake-func, version: "0.1", status: specified, category: functional, target: handle-touch-input, criteria: ["a touch during scheduled standby or manual-override off turns the screen on and refreshes departures", "the screen returns to its prior power state after the configured wake duration with no further input", "a touch during an active window with the screen already on does not change power state"] }
+  - { id: req-touch-screensaver-func, version: "0.1", status: specified, category: functional, target: handle-touch-input, criteria: ["a touch while the screensaver is active shows the dashboard for the configured duration, then the screensaver resumes while its calendar event is still active", "a touch never ends the calendar event or changes the screensaver's calendar-derived activation state"] }
+  - { id: req-touch-panel-func, version: "0.1", status: specified, category: functional, target: handle-touch-input, criteria: ["a tap on the football panel advances or pauses rotation and auto-rotation resumes after the idle timeout", "a tap on a departure row expands its detail and collapses it after the idle timeout", "a tap on a stale panel requests a refetch, rate-limited per provider", "taps on the clock and weather header have no effect"] }
+  - { id: req-touch-semantic, version: "0.1", status: specified, category: semantic, target: handle-touch-input, criteria: ["standby overrides touch except for the bounded wake window", "every touch-driven state reverts to the default view after the idle timeout"] }
+  - { id: req-touch-resilience, version: "0.1", status: specified, category: resilience, kind: non-functional, target: handle-touch-input, criteria: ["a missing or failing touch device leaves rendering, schedule and screensaver behavior unchanged", "touch_enabled = false in board.toml disables all touch handling"] }
+  - { id: req-touch-performance, version: "0.1", status: specified, category: performance, kind: non-functional, target: handle-touch-input, criteria: ["visual response to a tap appears within 100 ms on Pi 5 + Touch Display 2", "touch targets are at least 48 px"] }
+  - { id: req-touch-security, version: "0.1", status: specified, category: security, kind: non-functional, target: handle-touch-input, criteria: ["touch input can only change view state and bounded temporary overrides, never configuration, credentials or permanent power state"] }
+  - { id: req-touch-observability, version: "0.1", status: specified, category: observability, kind: non-functional, target: remote-screen-control, criteria: ["status reports distinguish a touch-initiated wake from the normal, scheduled-standby, manual-override and screensaver states"] }
   - { id: req-playground-deploy, version: "0.1", status: specified, category: functional, target: preview-playground, criteria: ["pushing to main updates the live Pages URL within the workflow's run time", "the playground never requires or references real credentials"] }
 
 evidence:
@@ -372,3 +402,4 @@ risks:
   - { id: risk-wlr-randr-env-fragility, target: schedule-display-power, description: "wlr-randr backlight control silently fails without the correct WAYLAND_DISPLAY/XDG_RUNTIME_DIR when invoked from a non-interactive systemd context.", treatment: mitigation, mitigated_by: [req-resilience-backlight] }
   - { id: risk-highlightly-tos-unverified, target: show-standings, description: "Highlightly Football API's attribution/commercial-use terms were not independently verified before selecting it for the free Allsvenskan adapter.", treatment: acceptance, residual_accepted: true }
   - { id: risk-scalability-not-applicable, target: pi-dashboard, description: "Single personal device, single viewer, no load-scaling obligation; scalability narrowed out of verification_categories for this reason.", treatment: acceptance, residual_accepted: true }
+  - { id: risk-touch-wayland-blanked-input, target: handle-touch-input, description: "Touch events may not reach Macroquad under Wayland, or not at all while the panel is blanked via wlr-randr; unconfirmed on this hardware.", treatment: mitigation, mitigated_by: [req-touch-resilience] }
