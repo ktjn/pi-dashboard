@@ -16,6 +16,11 @@ Wall-mounted dashboard, read from across a room, answering: when should I leave,
 | PI-06 | Deploy code, assets and validated configuration together from GitHub. Support unattended startup and recovery. | A walking-time-only change reaches the Pi through a release. A release that fails to render its first frame rolls back and is skipped on the next update check. |
 | PI-07 | Replace the dashboard with a configurable screensaver while a matching Google Calendar event is active (e.g. "Focus", "Away", "Meeting"), and restore the dashboard when the event ends. | With a calendar event titled "Focus 14:00–15:00" and a configured match on "Focus", the screensaver takes over at 14:00 and the dashboard returns at 15:00, even if the event is edited or cancelled mid-way. Calendar API outage leaves the dashboard showing, not stuck on the screensaver. |
 | PI-08 | Allow turning the screen off/on remotely over the LAN, as a temporary override on top of PI-05's schedule, and report current status (which of normal/scheduled-standby/manual-override/screensaver is active, per-panel data freshness, uptime, deployed version). | Sending an authenticated "off" request blanks the screen immediately and it stays off until the next scheduled window boundary, then resumes normal scheduling. A status request at any time reports the active state and per-panel freshness without needing SSH. |
+| PI-09 | A touch during scheduled standby or manual-override off wakes the screen for a configured duration (default 2 min), then restores the prior power state. Waking triggers a departures refresh. | With the panel blanked, a tap lights it within 1 s and refreshes departures; with no further input it blanks again after the configured duration. A touch in an active window changes nothing. |
+| PI-10 | A touch while the screensaver is active shows the dashboard for a configured duration, then the screensaver resumes while its calendar event is still active. | During a "Focus" event a tap shows the dashboard; after the duration with no input the screensaver returns. The event ending restores the dashboard regardless of touch. |
+| PI-11 | Football panel: tap advances or pauses rotation; auto-rotation resumes after the idle timeout. | A tap moves to the next competition and pauses; 45 s idle resumes rotation. |
+| PI-12 | Departures: tap a row to expand deviations and the next three departures; collapses after the idle timeout. | Tapping a row shows detail; with no input it collapses within the timeout. Header taps do nothing. |
+| PI-13 | Tap a stale panel to force a refetch, rate-limited per provider. | Tapping a stale weather panel triggers one fetch; repeated taps within the rate limit trigger none. |
 
 ## Runtime
 
@@ -96,6 +101,16 @@ DEFAULT_STATIONS = [
 3. Display windows, coordinates and stale-data thresholds: the spec's example values (06:00–09:00 + 16:00–22:30 weekdays, 08:00–23:00 weekends; Duvbo/Stockholm coordinates; departures 2 min / weather 20 min / football 2 h staleness) are the real v1 defaults, not placeholders.
 5. Calendar auth model: service account with calendar sharing (no browser-based OAuth refresh needed on-device).
 6. Screensaver visual design: clock-only for v1; photo rotation explicitly deferred.
+
+## Touch input (PI-09 to PI-13)
+
+- Touch is a view-state and bounded-override layer only. It never edits configuration, credentials or permanent power state.
+- A pure `InputEvent -> TouchState` reducer lives in `dashboard-core` (testable, wasm-compatible). `dashboard-pi` only translates raw touch events.
+- Every touch state reverts to the default view after the idle timeout (default 45 s). Touch targets are at least 48 px. The clock and weather header ignores taps.
+- Config: `[touch]` in `board.toml` with `enabled`, `wake_seconds`, `screensaver_dismiss_seconds`, `idle_timeout_seconds`.
+- Standby takes priority over touch except for the bounded wake window.
+- Hardware gate: confirm touch events reach Macroquad under Wayland, including while the panel is blanked via `wlr-randr`. Risk recorded as `risk-touch-wayland-blanked-input`.
+- Status reports add a touch-wake state.
 
 ## Open decisions
 
