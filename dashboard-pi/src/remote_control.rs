@@ -1,7 +1,7 @@
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use dashboard_core::departures::DeparturesPanelState;
@@ -181,9 +181,21 @@ pub struct RemoteControlState {
 
 pub fn remote_control_router(state: RemoteControlState) -> Router {
     Router::new()
+        .route("/", get(index_handler))
         .route("/control", post(control_handler))
         .route("/status", get(status_handler))
         .with_state(state)
+}
+
+/// Serves the small static control client at `/` - PI-08's "static client
+/// ... served as static files by the same embedded server at `/`". Built
+/// into the binary via `include_str!` rather than read from disk at
+/// startup, so there is no separate static-assets directory to deploy or
+/// path to get wrong. The page itself requires no token to load; it only
+/// sends one with each `/status`/`/control` call it makes from the
+/// browser, same as a user hitting those endpoints directly.
+async fn index_handler() -> Html<&'static str> {
+    Html(include_str!("../web/control.html"))
 }
 
 /// Bearer-token check, applied by hand inside each handler rather than as
@@ -441,6 +453,28 @@ mod tests {
             .expect("body must be readable")
             .to_bytes()
             .to_vec()
+    }
+
+    #[tokio::test]
+    async fn the_control_client_is_served_at_root_without_a_token() {
+        let override_path = unique_override_path("index-no-token");
+        let router = remote_control_router(test_state(override_path, "secret-token"));
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .expect("request must build");
+        let response = router.oneshot(request).await.expect("router must respond");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .expect("content-type must be set"),
+            "text/html; charset=utf-8",
+        );
+        let body = String::from_utf8(body_bytes(response).await).expect("body must be utf8");
+        assert!(body.contains("pi-dashboard control"));
     }
 
     #[tokio::test]

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-dashboard control</title>
+<style>
+  body { font: 16px system-ui, sans-serif; background: #0b1020; color: #e8ecf8; max-width: 28rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.25rem; }
+  button { font: inherit; padding: 0.6rem 1rem; margin: 0.25rem 0.25rem 0.25rem 0; border: 1px solid #3a4266; border-radius: 0.4rem; background: #151b33; color: inherit; cursor: pointer; }
+  button:hover { background: #1f2748; }
+  input { font: inherit; padding: 0.5rem; width: 100%; box-sizing: border-box; border: 1px solid #3a4266; border-radius: 0.4rem; background: #151b33; color: inherit; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 1rem; }
+  dt { opacity: 0.7; }
+  #error { color: #ff6b6b; }
+  #token-form, #panel { display: none; }
+</style>
+</head>
+<body>
+<h1>pi-dashboard control</h1>
+
+<div id="token-form">
+  <p>Enter the control token:</p>
+  <input id="token-input" type="password" autocomplete="off">
+  <button id="save-token">Save</button>
+</div>
+
+<div id="panel">
+  <dl id="status"></dl>
+  <button data-action="on">Turn on</button>
+  <button data-action="off">Turn off</button>
+  <button data-action="clear">Clear override</button>
+  <button id="forget-token">Forget token</button>
+</div>
+
+<p id="error"></p>
+
+<script>
+const STORAGE_KEY = "pi-dashboard-control-token";
+const tokenForm = document.getElementById("token-form");
+const panel = document.getElementById("panel");
+const errorEl = document.getElementById("error");
+const statusEl = document.getElementById("status");
+
+function token() {
+  return localStorage.getItem(STORAGE_KEY);
+}
+
+function showTokenForm() {
+  tokenForm.style.display = "block";
+  panel.style.display = "none";
+}
+
+function showPanel() {
+  tokenForm.style.display = "none";
+  panel.style.display = "block";
+}
+
+function setError(message) {
+  errorEl.textContent = message || "";
+}
+
+async function authedFetch(path, options) {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      ...(options && options.headers),
+      Authorization: `Bearer ${token()}`,
+    },
+  });
+  if (response.status === 401) {
+    localStorage.removeItem(STORAGE_KEY);
+    showTokenForm();
+    setError("Token rejected; enter it again.");
+    throw new Error("unauthorized");
+  }
+  return response;
+}
+
+async function refreshStatus() {
+  try {
+    const response = await authedFetch("/status");
+    if (!response.ok) {
+      setError(`status request failed: ${response.status}`);
+      return;
+    }
+    const report = await response.json();
+    setError("");
+    statusEl.innerHTML = Object.entries(report)
+      .map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`)
+      .join("");
+  } catch (error) {
+    if (error.message !== "unauthorized") {
+      setError(String(error));
+    }
+  }
+}
+
+async function sendAction(action) {
+  try {
+    const response = await authedFetch("/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    if (!response.ok) {
+      setError(`control request failed: ${response.status}`);
+      return;
+    }
+    await refreshStatus();
+  } catch (error) {
+    if (error.message !== "unauthorized") {
+      setError(String(error));
+    }
+  }
+}
+
+document.getElementById("save-token").addEventListener("click", () => {
+  const value = document.getElementById("token-input").value.trim();
+  if (!value) {
+    return;
+  }
+  localStorage.setItem(STORAGE_KEY, value);
+  showPanel();
+  refreshStatus();
+});
+
+document.getElementById("forget-token").addEventListener("click", () => {
+  localStorage.removeItem(STORAGE_KEY);
+  showTokenForm();
+});
+
+document.querySelectorAll("#panel button[data-action]").forEach((button) => {
+  button.addEventListener("click", () => sendAction(button.dataset.action));
+});
+
+if (token()) {
+  showPanel();
+  refreshStatus();
+  setInterval(refreshStatus, 5000);
+} else {
+  showTokenForm();
+}
+</script>
+</body>
+</html>
