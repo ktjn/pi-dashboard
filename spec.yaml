@@ -142,6 +142,16 @@ components:
     owns_data: [release-bundle]
     source_paths: [.github/workflows/ci.yml]
     formal_assessment: { applies: false, rationale: "Sequential download/verify/swap/rollback on one device; no concurrency or distributed-state between nodes." }
+  - id: update-agent
+    version: "0.1"
+    status: specified
+    layer: platform
+    owner: homelab
+    provides: [deploy-release]
+    owns_data: [update-agent-state]
+    source_paths: [dashboard-core/src/update_agent.rs, dashboard-pi/src/update_agent.rs]
+    test_paths: [dashboard-core/tests/update_agent.rs, dashboard-pi/src/update_agent.rs]
+    formal_assessment: { applies: false, rationale: "Sequential poll/verify/swap/health-check/rollback on one device; no concurrency or distributed state between nodes, same rationale as release-pipeline." }
   - id: pages-playground
     version: "0.1"
     status: specified
@@ -214,6 +224,11 @@ data_models:
     classification: internal
     external_source: github-releases
     fields: { version: string, digest: string, status: string }
+  - id: update-agent-state
+    version: "0.1"
+    owner: update-agent
+    classification: internal
+    fields: { current_version: string, last_known_good_version: string, candidate_version: string, candidate_digest: string, status: string, last_checked_at: datetime }
 
 requirements:
   - { id: req-departures-func, version: "0.1", status: specified, category: functional, target: show-departures, criteria: [elapsed departures are removed from view, walking-time countdown reflects the configured walk time] }
@@ -242,6 +257,12 @@ requirements:
   - { id: req-touch-performance, version: "0.1", status: specified, category: performance, kind: non-functional, target: handle-touch-input, criteria: ["visual response to a tap appears within 100 ms on Pi 5 + Touch Display 2", "touch targets are at least 48 px"] }
   - { id: req-touch-security, version: "0.1", status: specified, category: security, kind: non-functional, target: handle-touch-input, criteria: ["touch input can only change view state and bounded temporary overrides, never configuration, credentials or permanent power state"] }
   - { id: req-touch-observability, version: "0.1", status: specified, category: observability, kind: non-functional, target: remote-screen-control, criteria: ["status reports distinguish a touch-initiated wake from the normal, scheduled-standby, manual-override and screensaver states"] }
+  - { id: req-update-digest-func, version: "0.1", status: specified, category: functional, target: deploy-release, criteria: ["a downloaded bundle whose computed digest does not match the release's published digest is never staged or activated", "a digest-verified candidate is staged for activation"] }
+  - { id: req-update-activation-func, version: "0.1", status: specified, category: functional, target: deploy-release, criteria: ["a staged candidate is activated via an atomic swap only after a local health check confirms the new binary renders its first frame", "activation discovered during scheduled standby defers until the next scheduled wake instead of swapping immediately"] }
+  - { id: req-update-rollback-func, version: "0.1", status: specified, category: functional, target: deploy-release, criteria: ["a failed health check rolls back to the last-known-good version immediately", "a version that failed its health check is not retried as a candidate on a later poll"] }
+  - { id: req-update-semantic, version: "0.1", status: specified, category: semantic, target: deploy-release, criteria: [the last-known-good version is never removed while a newer candidate has not yet passed its own health check] }
+  - { id: req-update-resilience, version: "0.1", status: specified, category: resilience, kind: non-functional, target: deploy-release, criteria: ["a network failure while polling or downloading leaves the currently activated version untouched and is retried on the next poll interval", "a corrupted or partial download never reaches the digest-verified staged state"] }
+  - { id: req-update-observability, version: "0.1", status: specified, category: observability, kind: non-functional, target: remote-screen-control, criteria: ["status-report's version field reflects the currently activated version, not a staged or rolled-back candidate"] }
   - { id: req-playground-deploy, version: "0.1", status: specified, category: functional, target: preview-playground, criteria: ["pushing to main updates the live Pages URL within the workflow's run time", "the playground never requires or references real credentials"] }
 
 evidence:
@@ -403,3 +424,4 @@ risks:
   - { id: risk-highlightly-tos-unverified, target: show-standings, description: "Highlightly Football API's attribution/commercial-use terms were not independently verified before selecting it for the free Allsvenskan adapter.", treatment: acceptance, residual_accepted: true }
   - { id: risk-scalability-not-applicable, target: pi-dashboard, description: "Single personal device, single viewer, no load-scaling obligation; scalability narrowed out of verification_categories for this reason.", treatment: acceptance, residual_accepted: true }
   - { id: risk-touch-wayland-blanked-input, target: handle-touch-input, description: "Touch events may not reach Macroquad under Wayland, or not at all while the panel is blanked via wlr-randr; unconfirmed on this hardware.", treatment: mitigation, mitigated_by: [req-touch-resilience] }
+  - { id: risk-update-health-check-hardware, target: deploy-release, description: "The first-frame health check needs the real Pi 5 + Touch Display 2 + Macroquad/Wayland context to confirm rendering; unconfirmed on this hardware, so the pure staging/rollback decision logic is tested independently of an actual render check.", treatment: mitigation, mitigated_by: [req-update-rollback-func] }

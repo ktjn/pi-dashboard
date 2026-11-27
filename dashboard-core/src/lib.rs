@@ -8,4 +8,5 @@ pub mod screensaver;
 pub mod standings;
 pub mod theme;
 pub mod touch;
+pub mod update_agent;
 pub mod weather;

@@ -1,4 +1,5 @@
 mod remote_control;
+mod update_agent;
 
 use dashboard_core::board_config::{BoardConfig, FootballProvider, Screensaver, load_board_config};
 use dashboard_core::clock::local_clock;
@@ -25,6 +26,10 @@ use dashboard_core::standings::{
     parse_highlightly_current_season_response, parse_highlightly_standings_response,
 };
 use dashboard_core::theme::{Theme, load_fonts, palette};
+use dashboard_core::update_agent::{
+    ActivationDecision, PollEffect, UpdateAgentState, decide_activation, evaluate_candidate,
+    parse_github_latest_release, parse_sha256sum_digest, stage_if_digest_matches,
+};
 use dashboard_core::weather::{
     WeatherFetchError, WeatherReading, WeatherSnapshotStore, WeatherSource,
     parse_open_meteo_response,
@@ -82,6 +87,20 @@ const OVERRIDE_FILE_PATH: &str = "override-state.json";
 /// `FOOTBALL_DATA_ORG_API_KEY`/`HIGHLIGHTLY_API_KEY`, never a config file.
 const REMOTE_CONTROL_TOKEN_ENV_VAR: &str = "REMOTE_CONTROL_TOKEN";
 const REMOTE_CONTROL_BIND_ADDRESS: &str = "0.0.0.0:8080";
+/// Self-updates are not time-critical the way live panel data is; a
+/// coarse interval keeps the agent from re-downloading the bundle
+/// repeatedly while waiting out a scheduled-standby deferral.
+const UPDATE_AGENT_POLL_INTERVAL: StdDuration = StdDuration::from_secs(30 * 60);
+const UPDATE_AGENT_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+const UPDATE_AGENT_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/ktjn/pi-dashboard/releases/latest";
+/// Where the update agent records which version it has staged for
+/// activation (`req-update-activation-func`'s atomic swap). Reading this
+/// pointer to actually exec the new version and run its first-frame health
+/// check is a hardware-dependent follow-up (`risk-update-health-check-hardware`);
+/// this process only ever stages and records the decision, it never
+/// restarts itself.
+const ACTIVE_VERSION_FILE_PATH: &str = "active-version.txt";
 
 /// Deserialized shape of a Google service-account JSON key file (the
 /// credential format Google's console issues) - unverified live, built
@@ -341,6 +360,110 @@ fn spawn_weather_refresh_thread(
                 Err(error) => eprintln!("weather fetch failed: {error}"),
             }
             std::thread::sleep(WEATHER_REFRESH_INTERVAL);
+        }
+    });
+}
+
+/// One poll cycle: discover the latest release, and if it's a new,
+/// digest-verified candidate, decide whether to stage its activation now
+/// or defer it. Takes every external input as a parameter rather than
+/// reaching for a clock/HTTP client itself, so the decision logic
+/// (`evaluate_candidate`/`stage_if_digest_matches`/`decide_activation`) stays
+/// the pure, independently-tested core from `dashboard-core`; this function
+/// is just the I/O glue around it.
+fn poll_update_agent_once(
+    client: &reqwest::blocking::Client,
+    state: &UpdateAgentState,
+    schedule_awake: bool,
+) -> Result<UpdateAgentState, String> {
+    let latest_release_json = client
+        .get(UPDATE_AGENT_LATEST_RELEASE_URL)
+        .header("User-Agent", "pi-dashboard-update-agent")
+        .send()
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .text()
+        .map_err(|error| error.to_string())?;
+    let release = parse_github_latest_release(&latest_release_json).map_err(|error| error.to_string())?;
+
+    let (mut next, effect) = evaluate_candidate(state, release, OffsetDateTime::now_utc());
+    let PollEffect::DownloadRequested {
+        bundle_url,
+        digest_url,
+        ..
+    } = effect
+    else {
+        return Ok(next);
+    };
+
+    let published_digest_raw = client
+        .get(&digest_url)
+        .header("User-Agent", "pi-dashboard-update-agent")
+        .send()
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .text()
+        .map_err(|error| error.to_string())?;
+    let published_digest =
+        parse_sha256sum_digest(&published_digest_raw).map_err(|error| error.to_string())?;
+
+    let bundle_bytes = client
+        .get(&bundle_url)
+        .header("User-Agent", "pi-dashboard-update-agent")
+        .send()
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .bytes()
+        .map_err(|error| error.to_string())?;
+    let downloaded_digest = update_agent::sha256_hex(&bundle_bytes);
+
+    let (staged, outcome) = stage_if_digest_matches(&next, &published_digest, &downloaded_digest);
+    next = staged;
+    if outcome == dashboard_core::update_agent::DigestOutcome::Mismatch {
+        eprintln!("update agent: digest mismatch for candidate, dropping it");
+        return Ok(next);
+    }
+
+    if decide_activation(&next, schedule_awake) == ActivationDecision::ActivateNow
+        && let Some(version) = next.candidate_version.clone()
+    {
+        match update_agent::write_active_version_atomic(Path::new(ACTIVE_VERSION_FILE_PATH), &version) {
+            Ok(()) => eprintln!(
+                "update agent: staged {version} for activation (first-frame health check and self-restart are a hardware-dependent follow-up)"
+            ),
+            Err(error) => eprintln!("update agent: failed to write active-version file: {error}"),
+        }
+    }
+
+    Ok(next)
+}
+
+/// Polls GitHub Releases on a background thread, off the render loop, same
+/// posture as the other feeds. `current_version` seeds the agent's notion
+/// of "already running" so it never treats its own version as a new
+/// candidate.
+fn spawn_update_agent_thread(
+    time_zone: String,
+    display_windows: Vec<dashboard_core::board_config::DisplayWindow>,
+) {
+    std::thread::spawn(move || {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(UPDATE_AGENT_HTTP_TIMEOUT)
+            .build()
+            .expect("reqwest client must build");
+        let mut state = UpdateAgentState::starting_at(env!("CARGO_PKG_VERSION"));
+        loop {
+            let now_utc = OffsetDateTime::now_utc();
+            let schedule_awake =
+                is_within_display_window(&display_windows, &time_zone, now_utc).unwrap_or(true);
+            match poll_update_agent_once(&client, &state, schedule_awake) {
+                Ok(next) => state = next,
+                Err(error) => eprintln!("update agent: poll failed: {error}"),
+            }
+            std::thread::sleep(UPDATE_AGENT_POLL_INTERVAL);
         }
     });
 }
@@ -759,6 +882,11 @@ async fn main() {
 
     let standings_board = Arc::new(Mutex::new(StandingsBoard::new()));
     spawn_standings_refresh_threads(&board_config, Arc::clone(&standings_board));
+
+    spawn_update_agent_thread(
+        board_config.time_zone.clone(),
+        board_config.display_windows.clone(),
+    );
     let standings_rotation = StandingsRotation::new(
         board_config
             .competitions

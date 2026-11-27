@@ -364,6 +364,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "time",
  "tokio",
  "tower",
