@@ -1,7 +1,7 @@
 use dashboard_core::standings::{
-    FixtureStandingsSource, StandingsBoard, StandingsFetchError, StandingsPanelState,
-    StandingsRotation, StandingsSource, parse_football_data_standings_response,
-    parse_highlightly_standings_response,
+    FixtureStandingsSource, STANDINGS_STALE_AFTER, StandingsBoard, StandingsCacheSnapshot,
+    StandingsFetchError, StandingsPanelState, StandingsRotation, StandingsSource,
+    parse_football_data_standings_response, parse_highlightly_standings_response,
 };
 use std::collections::HashMap;
 use time::macros::datetime;
@@ -276,5 +276,36 @@ fn rotation_with_a_single_competition_always_returns_it() {
     assert_eq!(
         rotation.active_competition(now + time::Duration::seconds(100)),
         "serie-a"
+    );
+}
+
+#[test]
+fn snapshot_round_trips_through_json_preserving_tables_and_staleness() {
+    let rows =
+        parse_football_data_standings_response(&fixture("standings_football_data_serie_a.json"))
+            .expect("valid response must parse");
+    let fetched_at = datetime!(2026-11-24 20:00:00 UTC);
+
+    let mut board = StandingsBoard::new();
+    board.record_success("serie-a", rows.clone(), fetched_at);
+
+    let exported = board.export_snapshot();
+    let json = serde_json::to_string(&exported).expect("must serialize");
+    let decoded: StandingsCacheSnapshot = serde_json::from_str(&json).expect("must deserialize");
+
+    let mut restored = StandingsBoard::new();
+    restored.restore_snapshot(decoded);
+
+    assert_eq!(
+        restored.competition_state("serie-a", fetched_at + time::Duration::minutes(10)),
+        StandingsPanelState::Fresh(rows.clone())
+    );
+    let stale_now = fetched_at + STANDINGS_STALE_AFTER + time::Duration::seconds(1);
+    assert_eq!(
+        restored.competition_state("serie-a", stale_now),
+        StandingsPanelState::Stale {
+            rows,
+            age: stale_now - fetched_at,
+        }
     );
 }

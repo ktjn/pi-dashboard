@@ -1,6 +1,6 @@
 use dashboard_core::touch::{
-    DisplayContext, TouchConfig, TouchEffect, TouchMode, TouchState, TouchTarget, apply_touch,
-    revert_idle,
+    DisplayContext, REFETCH_RATE_LIMIT_SECONDS, TouchConfig, TouchEffect, TouchMode, TouchState,
+    TouchTarget, apply_touch, revert_idle,
 };
 use time::Duration;
 use time::macros::datetime;
@@ -32,7 +32,10 @@ fn a_tap_while_blanked_wakes_the_display_and_requests_a_departures_refresh() {
     assert_eq!(state.wake_until, Some(now + Duration::seconds(120)));
     assert_eq!(
         effects,
-        vec![TouchEffect::WakeDisplay, TouchEffect::RefreshDeparturesRequested]
+        vec![
+            TouchEffect::WakeDisplay,
+            TouchEffect::RefreshDeparturesRequested
+        ]
     );
 }
 
@@ -48,8 +51,13 @@ fn a_second_tap_during_an_active_wake_window_never_extends_it() {
     );
 
     let later = now + Duration::seconds(60);
-    let (state, effects) =
-        apply_touch(&woken, DisplayContext::Blanked, TouchTarget::Header, later, &ENABLED);
+    let (state, effects) = apply_touch(
+        &woken,
+        DisplayContext::Blanked,
+        TouchTarget::Header,
+        later,
+        &ENABLED,
+    );
 
     assert_eq!(state.wake_until, Some(now + Duration::seconds(120)));
     assert!(effects.is_empty());
@@ -127,7 +135,10 @@ fn a_tap_on_the_football_panel_advances_the_index_and_pauses_rotation() {
     let (state, effects) = apply_touch(
         &TouchState::new(),
         DisplayContext::Dashboard,
-        TouchTarget::FootballPanel { panel_count: 3 },
+        TouchTarget::FootballPanel {
+            panel_count: 3,
+            current_index: 0,
+        },
         now,
         &ENABLED,
     );
@@ -135,6 +146,36 @@ fn a_tap_on_the_football_panel_advances_the_index_and_pauses_rotation() {
     assert_eq!(state.football_index, Some(1));
     assert_eq!(state.last_input_at, Some(now));
     assert!(effects.is_empty());
+}
+
+#[test]
+fn tapping_the_football_panel_while_auto_rotated_advances_from_the_displayed_index() {
+    let now = datetime!(2026-11-26 20:00:00 UTC);
+    let (state, effects) = apply_touch(
+        &TouchState::new(),
+        DisplayContext::Dashboard,
+        TouchTarget::FootballPanel {
+            panel_count: 3,
+            current_index: 1,
+        },
+        now,
+        &ENABLED,
+    );
+
+    assert_eq!(state.football_index, Some(2));
+    assert!(effects.is_empty());
+
+    let (wrapped, _) = apply_touch(
+        &TouchState::new(),
+        DisplayContext::Dashboard,
+        TouchTarget::FootballPanel {
+            panel_count: 2,
+            current_index: 1,
+        },
+        now,
+        &ENABLED,
+    );
+    assert_eq!(wrapped.football_index, Some(0));
 }
 
 #[test]
@@ -147,7 +188,10 @@ fn a_tap_on_the_football_panel_wraps_back_to_the_first_competition() {
     let (state, _) = apply_touch(
         &paused,
         DisplayContext::Dashboard,
-        TouchTarget::FootballPanel { panel_count: 3 },
+        TouchTarget::FootballPanel {
+            panel_count: 3,
+            current_index: 0,
+        },
         now,
         &ENABLED,
     );
@@ -161,7 +205,10 @@ fn football_rotation_resumes_once_the_idle_timeout_elapses_with_no_further_input
     let (paused, _) = apply_touch(
         &TouchState::new(),
         DisplayContext::Dashboard,
-        TouchTarget::FootballPanel { panel_count: 3 },
+        TouchTarget::FootballPanel {
+            panel_count: 3,
+            current_index: 0,
+        },
         now,
         &ENABLED,
     );
@@ -274,4 +321,134 @@ fn a_disabled_touch_config_leaves_state_and_effects_untouched() {
 
     assert_eq!(state, TouchState::new());
     assert!(effects.is_empty());
+}
+
+#[test]
+fn tapping_the_same_stale_panel_within_the_rate_limit_emits_no_refetch() {
+    let now = datetime!(2026-11-26 20:00:00 UTC);
+    let (first_state, first_effects) = apply_touch(
+        &TouchState::new(),
+        DisplayContext::Dashboard,
+        TouchTarget::StalePanel {
+            provider: "weather".to_string(),
+        },
+        now,
+        &ENABLED,
+    );
+    assert_eq!(
+        first_effects,
+        vec![TouchEffect::RequestPanelRefetch {
+            provider: "weather".to_string()
+        }]
+    );
+
+    let within_limit = now + Duration::seconds(i64::from(REFETCH_RATE_LIMIT_SECONDS) - 1);
+    let (second_state, second_effects) = apply_touch(
+        &first_state,
+        DisplayContext::Dashboard,
+        TouchTarget::StalePanel {
+            provider: "weather".to_string(),
+        },
+        within_limit,
+        &ENABLED,
+    );
+    assert!(second_effects.is_empty());
+    assert_eq!(second_state.last_refetch_at.get("weather"), Some(&now));
+}
+
+#[test]
+fn tapping_a_different_stale_panel_is_not_blocked_by_another_providers_rate_limit() {
+    let now = datetime!(2026-11-26 20:00:00 UTC);
+    let (after_weather, _) = apply_touch(
+        &TouchState::new(),
+        DisplayContext::Dashboard,
+        TouchTarget::StalePanel {
+            provider: "weather".to_string(),
+        },
+        now,
+        &ENABLED,
+    );
+
+    let later = now + Duration::seconds(5);
+    let (after_departures, effects) = apply_touch(
+        &after_weather,
+        DisplayContext::Dashboard,
+        TouchTarget::StalePanel {
+            provider: "departures".to_string(),
+        },
+        later,
+        &ENABLED,
+    );
+    assert_eq!(
+        effects,
+        vec![TouchEffect::RequestPanelRefetch {
+            provider: "departures".to_string()
+        }]
+    );
+    assert_eq!(after_departures.last_refetch_at.get("weather"), Some(&now));
+    assert_eq!(
+        after_departures.last_refetch_at.get("departures"),
+        Some(&later)
+    );
+}
+
+#[test]
+fn tapping_a_stale_panel_again_after_the_rate_limit_elapses_requests_refetch() {
+    let now = datetime!(2026-11-26 20:00:00 UTC);
+    let (first_state, _) = apply_touch(
+        &TouchState::new(),
+        DisplayContext::Dashboard,
+        TouchTarget::StalePanel {
+            provider: "weather".to_string(),
+        },
+        now,
+        &ENABLED,
+    );
+
+    let after_limit = now + Duration::seconds(i64::from(REFETCH_RATE_LIMIT_SECONDS));
+    let (second_state, effects) = apply_touch(
+        &first_state,
+        DisplayContext::Dashboard,
+        TouchTarget::StalePanel {
+            provider: "weather".to_string(),
+        },
+        after_limit,
+        &ENABLED,
+    );
+    assert_eq!(
+        effects,
+        vec![TouchEffect::RequestPanelRefetch {
+            provider: "weather".to_string()
+        }]
+    );
+    assert_eq!(
+        second_state.last_refetch_at.get("weather"),
+        Some(&after_limit)
+    );
+}
+
+#[test]
+fn revert_idle_preserves_active_refetch_rate_limit_and_prunes_expired_entries() {
+    let short_idle = TouchConfig {
+        idle_timeout_seconds: 10,
+        ..ENABLED
+    };
+    let now = datetime!(2026-11-26 20:00:00 UTC);
+    let (state, _) = apply_touch(
+        &TouchState::new(),
+        DisplayContext::Dashboard,
+        TouchTarget::StalePanel {
+            provider: "weather".to_string(),
+        },
+        now,
+        &short_idle,
+    );
+
+    let after_idle_before_rate_limit = now + Duration::seconds(15);
+    let still_limited = revert_idle(&state, after_idle_before_rate_limit, &short_idle);
+    assert_eq!(still_limited.last_refetch_at.get("weather"), Some(&now));
+
+    let after_rate_limit = now + Duration::seconds(i64::from(REFETCH_RATE_LIMIT_SECONDS));
+    let pruned = revert_idle(&still_limited, after_rate_limit, &short_idle);
+    assert!(pruned.last_refetch_at.is_empty());
 }

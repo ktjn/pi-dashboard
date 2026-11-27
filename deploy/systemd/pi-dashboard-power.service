@@ -1,0 +1,13 @@
+[Unit]
+Description=Pi Dashboard Display Power Reconciler
+After=graphical-session.target pi-dashboard.service
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/pi-dashboard
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=%t
+Environment=DISPLAY_OUTPUT=DSI-1
+EnvironmentFile=-%h/.config/pi-dashboard/env
+ExecStart=%h/pi-dashboard/reconcile_power

@@ -172,3 +172,28 @@ fn rejects_a_touch_config_with_a_zero_duration() {
     let err = parse_board_config(&fixture("invalid_touch.toml")).unwrap_err();
     assert!(matches!(err, BoardConfigError::Invalid(_)));
 }
+
+#[test]
+fn rejects_unrecognized_time_zone() {
+    let input = fixture("valid.toml").replace("Europe/Stockholm", "Not/A_Real_Zone");
+    let err = parse_board_config(&input).unwrap_err();
+    assert!(matches!(err, BoardConfigError::Invalid(_)));
+    assert!(err.to_string().contains("Not/A_Real_Zone"));
+}
+
+#[test]
+fn rejects_invalid_screensaver_regex_pattern() {
+    let input = fixture("valid.toml").replace("^Away", "(unclosed");
+    let err = parse_board_config(&input).unwrap_err();
+    assert!(matches!(err, BoardConfigError::Invalid(_)));
+    assert!(err.to_string().contains("(unclosed"));
+}
+
+#[test]
+fn accepts_non_regex_syntax_in_substring_screensaver_rule() {
+    let input = fixture("valid.toml").replace("\"Focus\"", "\"(unclosed\"");
+    let config =
+        parse_board_config(&input).expect("substring rule must allow regex metacharacters");
+    let screensaver = config.screensaver.expect("screensaver must be present");
+    assert_eq!(screensaver.rules[0].pattern, "(unclosed");
+}

@@ -1,6 +1,10 @@
 # Implementation Plan
 
-Reference: `pi-dashboard-spec.md`. Requirements PI-01..08, Runtime, Resolved decisions.
+Reference: `pi-dashboard-spec.md`. Requirements PI-01..13, Runtime, Resolved decisions.
+
+## Current status
+- Phases 1–7 software implementation (`dashboard-core`, `dashboard-pi`, `reconcile_power`, `dashboard-web`, systemd units, CI/Pages workflows) is complete and verified locally.
+- Phase 0 hardware checks (Macroquad Wayland frame rate, `wlr-randr` from systemd user timer, blanked-panel touch input, on-device first-frame update health check) remain pending Pi 5 + Touch Display 2 hardware verification.
 
 ## Non-goals (carried from spec)
 - No Electron/Node/Python runtime on the Pi.
@@ -63,18 +67,19 @@ Exit criteria: a test calendar event matching a configured rule flips the state 
 ## Phase 5 — Remote control & status (PI-08)
 Depends on: Phase 3 (state machine + override file already exist), Phase 1 (HTTP server scaffolding can start earlier in parallel if useful, but wiring to real state needs Phase 3).
 
-1. Embedded HTTP server (e.g. `axum` or `tiny_http`) in `dashboard-pi`, bearer-token auth middleware reading the token from the systemd `EnvironmentFile`.
-2. `POST /off` → writes override-state file; `GET /status` → reads live app state (which of 4 states, per-panel freshness, uptime, version).
-3. Static client: small React app, built ahead of time (`pnpm build`), output served as static files by the same embedded server at `/`. One-time token prompt → `localStorage`.
+1. Embedded HTTP server (`axum`) in `dashboard-pi`, bearer-token auth middleware reading the token from the systemd `EnvironmentFile`.
+2. `POST /control` (`{"action":"on"|"off"|"clear"}`) → atomically writes/clears override-state file; `GET /status` → reads live app state (normal, scheduled-standby, manual-override, screensaver, touch-wake; per-panel freshness, uptime, version).
+3. Static client: embedded HTML/JS/CSS (`dashboard-pi/web/control.html`, compiled in via `include_str!`) served same-origin at `/`. One-time token prompt → `localStorage`.
 
-Exit criteria: from a phone/laptop on the same LAN, hitting `/off` blanks the screen and it stays off until the next schedule boundary (verified against Phase 3's reconciler); `/status` reflects reality; wrong/missing token is rejected.
+Exit criteria: from a phone/laptop on the same LAN, hitting `POST /control` with `{"action":"off"}` blanks the screen and it stays off until the next schedule boundary (verified against Phase 3's reconciler); `GET /status` reflects reality; wrong/missing token is rejected.
 
-## Phase 6 — Deployment pipeline (PI-06)
+## Phase 6 — Deployment pipeline (PI-06) & touch input (PI-09..13)
 Depends on: Phase 1 skeleton existing (per the "hold off on CI until skeleton exists" decision).
 
-1. GitHub Actions: validate `board.toml`, `cargo test`, `cargo clippy`, cross-compile ARM64 (`cross`), bundle binary + assets + validated config, publish to GitHub Releases.
+1. GitHub Actions: validate `board.toml`, compile workspace on PRs, and on `v*` tags cross-compile ARM64 (`cross`), bundle `dashboard-pi`, `reconcile_power`, `board.toml`, and `deploy/systemd`, generate `.sha256` digest, and publish to GitHub Releases. `cargo test`, `cargo clippy`, and `spec.yaml` verification run locally.
 2. Pi-side update agent: polls Releases, verifies digest, stages, atomic symlink swap, local health check (confirms first frame rendered), defers activation during standby until next wake, rollback to last-known-good on health-check failure.
 3. Offline resilience: cold boot with no network still shows clock + last valid cached data per panel, marks unavailable feeds; panels recover independently when connectivity returns (no full restart).
+4. Touch input (PI-09..13): pure reducer in `dashboard-core::touch` with 48 px hit targets in `dashboard-core::render`; wake from standby/override-off, screensaver dismissal, standings advance/pause, departure row expansion, rate-limited stale panel refetch, and idle reversion.
 
 Exit criteria: a trivial change (e.g. a walk-time tweak in `board.toml`) reaches the Pi through a real release and applies without a full redeploy of unrelated panels; a deliberately broken build is skipped/rolled back automatically.
 

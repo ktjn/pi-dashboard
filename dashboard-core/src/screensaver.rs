@@ -1,20 +1,12 @@
 use crate::board_config::{MatchType, ScreensaverRule};
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "fixtures")]
 use std::collections::HashMap;
 use std::fmt;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-/// Resolves a Google Calendar event `dateTime` that has no explicit UTC
-/// offset, using its sibling `timeZone` field - per
-/// https://developers.google.com/calendar/api/v3/reference/events/list,
-/// `dateTime` *may* omit the offset when `timeZone` carries the IANA zone
-/// name instead. Same `jiff`-based IANA zone resolution already used by
-/// `clock.rs`/`daylight.rs`/`schedule.rs` (and `dashboard-pi`'s
-/// `parse_sl_local_time`), kept consistent rather than introducing a second
-/// time-handling approach.
 fn resolve_offsetless_date_time(
     date_time: &str,
     time_zone: Option<&str>,
@@ -149,16 +141,6 @@ struct GoogleCalendarEvent {
 struct GoogleCalendarEventTime {
     #[serde(rename = "dateTime", default)]
     date_time: Option<String>,
-    /// Present on all-day events instead of `dateTime`; never read, since
-    /// those events are deliberately skipped below - kept only so an
-    /// all-day event's JSON still deserializes instead of failing the
-    /// whole batch.
-    #[serde(default)]
-    #[allow(dead_code)]
-    date: Option<String>,
-    /// Sibling of an offset-less `dateTime` - see
-    /// `resolve_offsetless_date_time`. Absent (and unused) when `dateTime`
-    /// already carries an explicit offset.
     #[serde(rename = "timeZone", default)]
     time_zone: Option<String>,
 }
@@ -220,12 +202,6 @@ pub fn parse_google_calendar_events_response(
     Ok(events)
 }
 
-/// Evaluates one title against one configured rule. An invalid regex
-/// pattern never matches rather than panicking or failing the whole poll -
-/// `board_config.rs` does not currently validate regex syntax at
-/// `board.toml` load time (noted as a gap in this slice's report), so a
-/// bad pattern must degrade to "never matches" here instead of surfacing
-/// as a runtime failure every poll.
 fn matches_rule(title: &str, rule: &ScreensaverRule) -> bool {
     match rule.match_type {
         MatchType::Substring => title.to_lowercase().contains(&rule.pattern.to_lowercase()),
@@ -258,16 +234,12 @@ pub enum CalendarAvailability {
     Unavailable,
 }
 
-/// Holds the screensaver-activation boolean independently of whether the
-/// calendar check itself is currently succeeding - per the spec, "if the
-/// calendar API is unreachable or returns an error, keep the current
-/// screensaver state unchanged rather than guessing." `active` only ever
-/// changes on `record_success`; `record_failure` deliberately touches
-/// nothing but `last_success_at`'s implied age, which only
-/// `availability()` reads. This is the opposite of
-/// `WeatherSnapshotStore`'s behavior (weather shows "unavailable" once
-/// stale); here staleness is a separate, purely informational signal, not
-/// a trigger to blank the activation boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalendarCacheSnapshot {
+    pub active: bool,
+    pub last_success_at_unix: Option<i64>,
+}
+
 #[derive(Debug, Default)]
 pub struct CalendarPollState {
     active: bool,
@@ -285,6 +257,24 @@ impl CalendarPollState {
     }
 
     pub fn record_failure(&mut self) {}
+
+    pub fn export_snapshot(&self) -> CalendarCacheSnapshot {
+        CalendarCacheSnapshot {
+            active: self.active,
+            last_success_at_unix: self.last_success_at.map(OffsetDateTime::unix_timestamp),
+        }
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: CalendarCacheSnapshot) {
+        if let Ok(last_success_at) = snapshot
+            .last_success_at_unix
+            .map(OffsetDateTime::from_unix_timestamp)
+            .transpose()
+        {
+            self.active = snapshot.active;
+            self.last_success_at = last_success_at;
+        }
+    }
 
     pub fn screensaver_active(&self) -> bool {
         self.active

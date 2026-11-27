@@ -54,7 +54,9 @@ jobs:
       - run: |
           mkdir -p bundle
           cp target/aarch64-unknown-linux-gnu/release/dashboard-pi bundle/
+          cp target/aarch64-unknown-linux-gnu/release/reconcile_power bundle/
           cp board.toml bundle/
+          cp -r deploy/systemd bundle/systemd
           tar -czf pi-dashboard-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz -C bundle .
 
       - run: sha256sum pi-dashboard-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz > pi-dashboard-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz.sha256

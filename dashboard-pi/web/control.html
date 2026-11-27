@@ -41,9 +41,22 @@ const tokenForm = document.getElementById("token-form");
 const panel = document.getElementById("panel");
 const errorEl = document.getElementById("error");
 const statusEl = document.getElementById("status");
+let pollTimer = null;
 
 function token() {
   return localStorage.getItem(STORAGE_KEY);
+}
+
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(refreshStatus, 5000);
+}
+
+function stopPolling() {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
 }
 
 function showTokenForm() {
@@ -69,6 +82,7 @@ async function authedFetch(path, options) {
     },
   });
   if (response.status === 401) {
+    stopPolling();
     localStorage.removeItem(STORAGE_KEY);
     showTokenForm();
     setError("Token rejected; enter it again.");
@@ -86,9 +100,15 @@ async function refreshStatus() {
     }
     const report = await response.json();
     setError("");
-    statusEl.innerHTML = Object.entries(report)
-      .map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`)
-      .join("");
+    const nodes = [];
+    for (const [key, value] of Object.entries(report)) {
+      const dt = document.createElement("dt");
+      dt.textContent = key;
+      const dd = document.createElement("dd");
+      dd.textContent = String(value);
+      nodes.push(dt, dd);
+    }
+    statusEl.replaceChildren(...nodes);
   } catch (error) {
     if (error.message !== "unauthorized") {
       setError(String(error));
@@ -123,9 +143,11 @@ document.getElementById("save-token").addEventListener("click", () => {
   localStorage.setItem(STORAGE_KEY, value);
   showPanel();
   refreshStatus();
+  startPolling();
 });
 
 document.getElementById("forget-token").addEventListener("click", () => {
+  stopPolling();
   localStorage.removeItem(STORAGE_KEY);
   showTokenForm();
 });
@@ -137,7 +159,7 @@ document.querySelectorAll("#panel button[data-action]").forEach((button) => {
 if (token()) {
   showPanel();
   refreshStatus();
-  setInterval(refreshStatus, 5000);
+  startPolling();
 } else {
   showTokenForm();
 }

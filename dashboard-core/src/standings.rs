@@ -1,13 +1,11 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use time::Duration;
+use time::{Duration, OffsetDateTime};
 
-/// Resolved decision #3: football standings are stale after 2 hours (vs
-/// weather's 20 minutes and departures' 2 minutes).
 pub const STANDINGS_STALE_AFTER: Duration = Duration::hours(2);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StandingsRow {
     pub competition: String,
     pub season: String,
@@ -426,11 +424,18 @@ pub enum StandingsPanelState {
     Unavailable,
 }
 
-/// Per-competition last-successful-table cache (per the spec's "cache the
-/// last successful table per competition and season"), independent of
-/// which provider backs a given competition - one competition's feed
-/// failing never blanks the other's, same isolation `DeparturesBoard`
-/// gives per site.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedCompetitionStandings {
+    pub competition_id: String,
+    pub fetched_at_unix: i64,
+    pub rows: Vec<StandingsRow>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StandingsCacheSnapshot {
+    pub competitions: Vec<CachedCompetitionStandings>,
+}
+
 #[derive(Debug, Default)]
 pub struct StandingsBoard {
     competitions: HashMap<String, CompetitionSnapshot>,
@@ -445,7 +450,7 @@ impl StandingsBoard {
         &mut self,
         competition_id: &str,
         rows: Vec<StandingsRow>,
-        fetched_at: time::OffsetDateTime,
+        fetched_at: OffsetDateTime,
     ) {
         self.competitions.insert(
             competition_id.to_string(),
@@ -453,10 +458,40 @@ impl StandingsBoard {
         );
     }
 
+    pub fn export_snapshot(&self) -> StandingsCacheSnapshot {
+        let mut competitions: Vec<CachedCompetitionStandings> = self
+            .competitions
+            .iter()
+            .map(|(competition_id, snapshot)| CachedCompetitionStandings {
+                competition_id: competition_id.clone(),
+                fetched_at_unix: snapshot.fetched_at.unix_timestamp(),
+                rows: snapshot.rows.clone(),
+            })
+            .collect();
+        competitions.sort_by(|left, right| left.competition_id.cmp(&right.competition_id));
+        StandingsCacheSnapshot { competitions }
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: StandingsCacheSnapshot) {
+        self.competitions.clear();
+        for entry in snapshot.competitions {
+            let Ok(fetched_at) = OffsetDateTime::from_unix_timestamp(entry.fetched_at_unix) else {
+                continue;
+            };
+            self.competitions.insert(
+                entry.competition_id,
+                CompetitionSnapshot {
+                    rows: entry.rows,
+                    fetched_at,
+                },
+            );
+        }
+    }
+
     pub fn competition_state(
         &self,
         competition_id: &str,
-        now: time::OffsetDateTime,
+        now: OffsetDateTime,
     ) -> StandingsPanelState {
         let Some(snapshot) = self.competitions.get(competition_id) else {
             return StandingsPanelState::Unavailable;

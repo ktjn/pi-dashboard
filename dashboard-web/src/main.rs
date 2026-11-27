@@ -2,24 +2,30 @@ use dashboard_core::board_config::{MatchType, ScreensaverRule, Station, TransitM
 use dashboard_core::clock::local_clock;
 use dashboard_core::daylight::daylight_window;
 use dashboard_core::departures::{
-    DEPARTURES_STALE_AFTER, DeparturesBoard, DeparturesSource, DeviationsSource,
-    FixtureDeparturesSource, FixtureDeviationsSource, RawDeparture,
+    DEPARTURES_STALE_AFTER, DeparturesBoard, DeparturesPanelState, DeparturesSource,
+    DeviationsSource, FixtureDeparturesSource, FixtureDeviationsSource, RawDeparture,
 };
 use dashboard_core::render::{
-    STATION_PANEL_HEIGHT, render_clock_weather_header, render_daylight_strip,
-    render_departures_panel, render_screensaver_view, render_standings_panel,
+    StationLayoutInput, compute_dashboard_layout, hit_test, render_calendar_availability_note,
+    render_clock_weather_header, render_daylight_strip_at, render_departures_panel_with_header,
+    render_screensaver_view, render_standings_panel,
 };
 use dashboard_core::schedule::{DisplayState, reconcile};
 use dashboard_core::screensaver::{
     CalendarEvent, CalendarPollState, FixtureCalendarSource, poll_calendar,
 };
 use dashboard_core::standings::{
-    FixtureStandingsSource, STANDINGS_STALE_AFTER, StandingsBoard, StandingsRotation, StandingsRow,
-    StandingsSource,
+    FixtureStandingsSource, STANDINGS_STALE_AFTER, StandingsBoard, StandingsPanelState,
+    StandingsRotation, StandingsRow, StandingsSource,
 };
 use dashboard_core::theme::{Theme, load_fonts, palette};
+use dashboard_core::touch::{
+    DisplayContext, TouchConfig, TouchEffect, TouchMode, TouchState, TouchTarget, apply_touch,
+    revert_idle,
+};
 use dashboard_core::weather::{
-    FixtureWeatherSource, WEATHER_STALE_AFTER, WeatherReading, WeatherSnapshotStore, WeatherSource,
+    FixtureWeatherSource, WEATHER_STALE_AFTER, WeatherPanelState, WeatherReading,
+    WeatherSnapshotStore, WeatherSource,
 };
 use jiff::civil::Date;
 use std::collections::HashMap;
@@ -39,71 +45,11 @@ const STANDINGS_ROTATION_INTERVAL_SECONDS: u32 = 15;
 
 const SCREENSAVER_CALENDAR_ID: &str = "primary";
 
-/// How often the playground re-polls the fixture calendar relative to its
-/// own advancing clock - frequent enough that a viewer watching the
-/// playground actually sees the screensaver activate and clear within a
-/// reasonable wait, same reasoning as the departures/weather refresh
-/// intervals above.
 const PLAYGROUND_CALENDAR_POLL_INTERVAL: Duration = Duration::seconds(15);
-
-/// How often the playground re-generates fixture departures relative to
-/// its own advancing clock (`now_utc`, not the frozen `base_utc`), so
-/// departures keep refreshing instead of elapsing/going stale within a
-/// couple of minutes of the playground being opened.
 const PLAYGROUND_DEPARTURES_REFRESH_INTERVAL: Duration = Duration::seconds(30);
-
-/// Same reasoning as `PLAYGROUND_DEPARTURES_REFRESH_INTERVAL`, applied to
-/// the weather fixture: its `observed_at`/`fetched_at` must track the
-/// playground's advancing `now_utc`, not a frozen timestamp, or the
-/// weather panel silently goes permanently Stale then Unavailable within
-/// minutes of being opened.
 const PLAYGROUND_WEATHER_REFRESH_INTERVAL: Duration = Duration::minutes(10);
-
-/// Same reasoning again, applied to the standings fixture - without a
-/// periodic refresh here, `StandingsBoard` would only ever hold its
-/// one-time startup snapshot and never demonstrate ongoing normal
-/// operation.
 const PLAYGROUND_STANDINGS_REFRESH_INTERVAL: Duration = Duration::minutes(5);
 
-/// Phase 7 step 1 asks for fixture coverage of each panel's
-/// normal/stale/unavailable states, not just "Fresh". Departures' (2 min),
-/// weather's (20 min) and standings' (2h) real staleness thresholds are
-/// too long to wait out live in a playground session, so instead of
-/// literally waiting, each of those three panels is scripted through a
-/// short, shared timeline that repeats every `DEMO_CYCLE_LENGTH` (so a
-/// viewer who leaves the playground open keeps seeing every state rather
-/// than settling into a permanent `Fresh` after one pass):
-///
-/// - `[0, DEMO_UNAVAILABLE_UNTIL)`: no fetch has been attempted yet (or
-///   has been attempted since the current cycle started), so each
-///   panel's board/store is empty and genuinely reports `Unavailable` -
-///   the same state a real cold boot before the first successful fetch
-///   would show.
-/// - `[DEMO_UNAVAILABLE_UNTIL, DEMO_STALE_FROM)` and everything from
-///   `DEMO_STALE_UNTIL` to `DEMO_CYCLE_LENGTH`: `Fresh`, refreshed
-///   periodically per panel exactly as before this phase scripting was
-///   added.
-/// - `[DEMO_STALE_FROM, DEMO_STALE_UNTIL)`: each panel records one fetch
-///   whose own `fetched_at`/`observed_at` is already older than that
-///   panel's real staleness threshold - the same age computation a
-///   provider outage would hit - without needing to wait out the real
-///   threshold.
-///
-/// The screensaver's fixture calendar event (see `fixture_calendar_events`)
-/// is active for `[DEMO_SCREENSAVER_FROM, DEMO_SCREENSAVER_UNTIL)` of the
-/// same cycle. `DEMO_STALE_FROM`/`DEMO_STALE_UNTIL` are placed with a
-/// comfortable margin after `DEMO_SCREENSAVER_UNTIL` - the screensaver
-/// view fully masks every panel (`reconcile` returns `Screensaver` and the
-/// render loop draws the screensaver and `continue`s before any panel
-/// renders), so a Stale window that overlapped it would never actually be
-/// visible to a viewer. The two windows must never overlap or be placed
-/// adjacent with no buffer, since poll-timing jitter near a shared
-/// boundary could make the Stale state flaky to observe.
-///
-/// The daylight panel has no such states: it is a pure local calculation
-/// with no network dependency, so it is intentionally left out of this
-/// scripting and always renders `Fresh`-equivalent (correct) values for
-/// the real local date.
 const DEMO_UNAVAILABLE_UNTIL: Duration = Duration::seconds(10);
 const DEMO_SCREENSAVER_FROM: Duration = Duration::seconds(60);
 const DEMO_SCREENSAVER_UNTIL: Duration = Duration::seconds(180);
@@ -128,10 +74,20 @@ fn demo_phase(elapsed_since_start: Duration) -> DemoPhase {
     }
 }
 
-/// Fixture departures for the playground: no real network, mirrors the
-/// `board.toml` default Duvbo station. Timestamps are generated relative
-/// to whatever "now" is passed in, so periodic regeneration keeps them
-/// usably fresh.
+fn resolve_competition_index(
+    ids: &[&str],
+    active_id: &str,
+    override_index: Option<usize>,
+) -> usize {
+    if ids.is_empty() {
+        return 0;
+    }
+    match override_index {
+        Some(index) => index % ids.len(),
+        None => ids.iter().position(|&id| id == active_id).unwrap_or(0),
+    }
+}
+
 fn fixture_duvbo_departures(now: time::OffsetDateTime) -> Vec<RawDeparture> {
     vec![
         RawDeparture {
@@ -153,8 +109,6 @@ fn fixture_duvbo_departures(now: time::OffsetDateTime) -> Vec<RawDeparture> {
     ]
 }
 
-/// Fixture departures for the playground's second configured station
-/// (`board.toml`'s Sundbyberg, TRAIN towards Stockholm).
 fn fixture_sundbyberg_departures(now: time::OffsetDateTime) -> Vec<RawDeparture> {
     vec![RawDeparture {
         destination: "Stockholm Central".to_string(),
@@ -166,51 +120,41 @@ fn fixture_sundbyberg_departures(now: time::OffsetDateTime) -> Vec<RawDeparture>
     }]
 }
 
-/// Builds and drains the fixture departures sources for every configured
-/// station, recording a success snapshot for each into `board` - the same
-/// `DeparturesSource`/`record_departures_success` path the real
-/// `dashboard-pi` refresh threads use, rather than poking `RawDeparture`
-/// values into the board directly.
-///
-/// `generation_time` and `fetched_at` are deliberately separate: departure
-/// times are always generated relative to `generation_time` (so they stay
-/// sensibly in the future), while `fetched_at` is what
-/// `DeparturesPanelState`'s staleness check actually ages against - letting
-/// the demo-stale window (see `DEMO_STALE_FROM`) record a fetch that
-/// *claims* to be older than `DEPARTURES_STALE_AFTER` without the cached
-/// departures themselves looking already-elapsed.
+fn refresh_fixture_departures_for_site(
+    board: &mut DeparturesBoard,
+    site_id: u32,
+    generation_time: time::OffsetDateTime,
+    fetched_at: time::OffsetDateTime,
+) -> bool {
+    let departures = match site_id {
+        DUVBO_SITE_ID => fixture_duvbo_departures(generation_time),
+        SUNDBYBERG_SITE_ID => fixture_sundbyberg_departures(generation_time),
+        _ => return false,
+    };
+    let mut departures_responses = HashMap::new();
+    departures_responses.insert(site_id, Ok(departures));
+    let mut departures_source = FixtureDeparturesSource::new(departures_responses);
+    let mut deviations_source = FixtureDeviationsSource::new(HashMap::new());
+
+    if let Ok(departures) = departures_source.fetch_departures(site_id) {
+        board.record_departures_success(site_id, departures, fetched_at);
+    }
+    if let Ok(deviations) = deviations_source.fetch_deviations(site_id) {
+        board.record_deviations_success_at(site_id, deviations, fetched_at);
+    }
+    true
+}
+
 fn refresh_fixture_departures(
     board: &mut DeparturesBoard,
     generation_time: time::OffsetDateTime,
     fetched_at: time::OffsetDateTime,
 ) {
-    let mut departures_responses = HashMap::new();
-    departures_responses.insert(DUVBO_SITE_ID, Ok(fixture_duvbo_departures(generation_time)));
-    departures_responses.insert(
-        SUNDBYBERG_SITE_ID,
-        Ok(fixture_sundbyberg_departures(generation_time)),
-    );
-    let mut departures_source = FixtureDeparturesSource::new(departures_responses);
-
-    let mut deviations_source = FixtureDeviationsSource::new(HashMap::new());
-
     for site_id in [DUVBO_SITE_ID, SUNDBYBERG_SITE_ID] {
-        if let Ok(departures) = departures_source.fetch_departures(site_id) {
-            board.record_departures_success(site_id, departures, fetched_at);
-        }
-        if let Ok(deviations) = deviations_source.fetch_deviations(site_id) {
-            board.record_deviations_success(site_id, deviations);
-        }
+        refresh_fixture_departures_for_site(board, site_id, generation_time, fetched_at);
     }
 }
 
-/// Refreshes the fixture weather reading, through the same
-/// `WeatherSource`/`record_success` path a real provider would use.
-/// `observed_at` and `fetched_at` are deliberately separate - see
-/// `refresh_fixture_departures` above for why; here `observed_at` is what
-/// `WeatherPanelState`'s staleness check ages against, letting the
-/// demo-stale window record a reading that claims an old observation time
-/// without the surrounding fetch failing outright.
 fn refresh_fixture_weather(
     store: &mut WeatherSnapshotStore,
     observed_at: time::OffsetDateTime,
@@ -272,25 +216,54 @@ fn fixture_serie_a_table() -> Vec<StandingsRow> {
     ]
 }
 
-/// Builds and drains the fixture standings sources for both configured
-/// competitions, recording a success snapshot for each into `board` -
-/// the same `StandingsSource`/`record_success` path a real provider
-/// client uses.
-fn refresh_fixture_standings(board: &mut StandingsBoard, now: time::OffsetDateTime) {
+fn refresh_fixture_standings_for_competition(
+    board: &mut StandingsBoard,
+    competition_id: &str,
+    now: time::OffsetDateTime,
+) -> bool {
+    let rows = match competition_id {
+        ALLSVENSKAN_ID => fixture_allsvenskan_table(),
+        SERIE_A_ID => fixture_serie_a_table(),
+        _ => return false,
+    };
     let mut responses = HashMap::new();
-    responses.insert(ALLSVENSKAN_ID.to_string(), Ok(fixture_allsvenskan_table()));
-    responses.insert(SERIE_A_ID.to_string(), Ok(fixture_serie_a_table()));
+    responses.insert(competition_id.to_string(), Ok(rows));
     let mut source = FixtureStandingsSource::new(responses);
 
+    if let Ok(rows) = source.fetch_standings(competition_id) {
+        board.record_success(competition_id, rows, now);
+    }
+    true
+}
+
+fn refresh_fixture_standings(board: &mut StandingsBoard, now: time::OffsetDateTime) {
     for competition_id in [ALLSVENSKAN_ID, SERIE_A_ID] {
-        if let Ok(rows) = source.fetch_standings(competition_id) {
-            board.record_success(competition_id, rows, now);
-        }
+        refresh_fixture_standings_for_competition(board, competition_id, now);
     }
 }
 
-/// Mirrors a `board.toml` `[[screensaver.rules]]` entry so the playground
-/// exercises the same substring-matching path a real `board.toml` would.
+fn apply_panel_refetch(
+    provider: &str,
+    now_utc: time::OffsetDateTime,
+    weather_store: &mut WeatherSnapshotStore,
+    departures_board: &mut DeparturesBoard,
+    standings_board: &mut StandingsBoard,
+) -> bool {
+    if provider == "weather" {
+        refresh_fixture_weather(weather_store, now_utc, now_utc);
+        return true;
+    }
+    if let Some(site_str) = provider.strip_prefix("departures:") {
+        return site_str.parse::<u32>().is_ok_and(|site_id| {
+            refresh_fixture_departures_for_site(departures_board, site_id, now_utc, now_utc)
+        });
+    }
+    if let Some(competition_id) = provider.strip_prefix("standings:") {
+        return refresh_fixture_standings_for_competition(standings_board, competition_id, now_utc);
+    }
+    false
+}
+
 fn fixture_screensaver_rules() -> Vec<ScreensaverRule> {
     vec![ScreensaverRule {
         pattern: "focus".to_string(),
@@ -298,15 +271,6 @@ fn fixture_screensaver_rules() -> Vec<ScreensaverRule> {
     }]
 }
 
-/// One fixture calendar event, active for `[DEMO_SCREENSAVER_FROM,
-/// DEMO_SCREENSAVER_UNTIL)` of the current demo cycle (see
-/// `DEMO_CYCLE_LENGTH`'s doc comment), so a viewer watching it actually
-/// sees the screensaver take over and the dashboard return - demonstrating
-/// both halves of PI-07's acceptance check without needing a real
-/// calendar. `cycle_start_utc` is the UTC instant the *current* cycle
-/// began (not the playground's fixed startup time), so the event's
-/// absolute window is re-derived every cycle and the screensaver keeps
-/// recurring on each loop instead of only firing once.
 fn fixture_calendar_events(cycle_start_utc: time::OffsetDateTime) -> Vec<CalendarEvent> {
     vec![CalendarEvent {
         event_id: "playground-focus-block".to_string(),
@@ -316,8 +280,6 @@ fn fixture_calendar_events(cycle_start_utc: time::OffsetDateTime) -> Vec<Calenda
     }]
 }
 
-/// Drives the fixture calendar through the same `CalendarSource`/
-/// `poll_calendar` path a real `dashboard-pi` poll thread uses.
 fn refresh_fixture_calendar(
     state: &mut CalendarPollState,
     rules: &[ScreensaverRule],
@@ -333,10 +295,22 @@ fn refresh_fixture_calendar(
     poll_calendar(&mut source, SCREENSAVER_CALENDAR_ID, rules, now, state);
 }
 
+fn collect_frame_taps() -> Vec<(f32, f32)> {
+    let mut taps: Vec<(f32, f32)> = macroquad::input::touches()
+        .into_iter()
+        .filter(|touch| touch.phase == macroquad::input::TouchPhase::Started)
+        .map(|touch| (touch.position.x, touch.position.y))
+        .collect();
+    if taps.is_empty()
+        && macroquad::input::is_mouse_button_pressed(macroquad::input::MouseButton::Left)
+    {
+        taps.push(macroquad::input::mouse_position());
+    }
+    taps
+}
+
 #[macroquad::main("pi-dashboard (playground)")]
 async fn main() {
-    // Fixture data in place of a real provider - the playground never
-    // talks to a real network.
     let (mono_font, sans_font) = load_fonts().expect("vendored fonts must load");
     let theme = Theme {
         mono: &mono_font,
@@ -346,12 +320,6 @@ async fn main() {
     let base_utc = datetime!(2026-11-24 20:00:00 UTC);
     let start_time = macroquad::time::get_time();
 
-    // Weather, departures and standings deliberately start empty rather
-    // than eagerly populated: the `DEMO_UNAVAILABLE_UNTIL` window below
-    // relies on each board/store genuinely never having recorded a
-    // success yet, so their panels render `Unavailable` for the first
-    // few seconds the playground is open, same as a real cold boot
-    // before the first successful fetch.
     let mut weather_store = WeatherSnapshotStore::new();
     let mut last_weather_refresh = base_utc;
 
@@ -363,6 +331,7 @@ async fn main() {
 
     let mut last_demo_phase: Option<DemoPhase> = None;
 
+    let competition_ids = [ALLSVENSKAN_ID, SERIE_A_ID];
     let standings_rotation = StandingsRotation::new(
         vec![ALLSVENSKAN_ID.to_string(), SERIE_A_ID.to_string()],
         STANDINGS_ROTATION_INTERVAL_SECONDS,
@@ -377,6 +346,14 @@ async fn main() {
         base_utc,
     );
     let mut last_calendar_refresh = base_utc;
+
+    let touch_config = TouchConfig {
+        enabled: true,
+        wake_seconds: TouchConfig::DEFAULT_WAKE_SECONDS,
+        screensaver_dismiss_seconds: TouchConfig::DEFAULT_SCREENSAVER_DISMISS_SECONDS,
+        idle_timeout_seconds: TouchConfig::DEFAULT_IDLE_TIMEOUT_SECONDS,
+    };
+    let mut touch_state = TouchState::new();
 
     let stations = [
         Station {
@@ -408,17 +385,12 @@ async fn main() {
         let cycle_start_utc = base_utc + Duration::seconds(cycle_index * cycle_length_seconds);
         let elapsed_since_start = Duration::seconds(elapsed_in_cycle);
 
+        touch_state = revert_idle(&touch_state, now_utc, &touch_config);
+
         let phase = demo_phase(elapsed_since_start);
         if Some(phase) != last_demo_phase {
             last_demo_phase = Some(phase);
             match phase {
-                // Reset every board/store back to empty so repeat cycles
-                // genuinely report `Unavailable` again, rather than still
-                // showing whatever Fresh/Stale data survived from the
-                // previous cycle (the real staleness thresholds are long
-                // enough - departures 2 min, weather 20 min, standings 2h
-                // - that leftover data from moments ago would otherwise
-                // still read as Fresh here).
                 DemoPhase::Unavailable => {
                     weather_store = WeatherSnapshotStore::new();
                     departures_board = DeparturesBoard::new();
@@ -433,10 +405,6 @@ async fn main() {
                     last_standings_refresh = now_utc;
                 }
                 DemoPhase::Stale => {
-                    // Each fetch claims a timestamp already older than
-                    // that panel's own real staleness threshold, so the
-                    // panel reports `Stale` immediately rather than
-                    // after literally waiting out the threshold.
                     let weather_observed_at = now_utc - WEATHER_STALE_AFTER - Duration::minutes(5);
                     refresh_fixture_weather(&mut weather_store, weather_observed_at, now_utc);
                     let departures_fetched_at =
@@ -480,22 +448,149 @@ async fn main() {
             last_calendar_refresh = now_utc;
         }
 
+        let mut taps = collect_frame_taps();
+
         macroquad::window::clear_background(palette::INK);
 
         let clock = local_clock(STOCKHOLM_TZ, now_utc).expect("time zone must resolve");
+        let calendar_availability = calendar_poll_state.availability(now_utc);
 
-        // No display-window/override concept in the playground - only the
-        // screensaver's own activation boolean drives this branch, same
-        // `reconcile` call `dashboard-pi` uses.
         let display_state = reconcile(true, None, calendar_poll_state.screensaver_active());
-        if display_state == DisplayState::Screensaver {
-            render_screensaver_view(&clock, &calendar_poll_state.availability(now_utc), &theme);
-            macroquad::window::next_frame().await;
-            continue;
+        if display_state == DisplayState::Screensaver
+            && touch_state.mode != TouchMode::ScreensaverDismissed
+        {
+            if !taps.is_empty() {
+                let (next_state, _) = apply_touch(
+                    &touch_state,
+                    DisplayContext::Screensaver,
+                    TouchTarget::Header,
+                    now_utc,
+                    &touch_config,
+                );
+                touch_state = next_state;
+                taps.clear();
+            }
+            if touch_state.mode != TouchMode::ScreensaverDismissed {
+                render_screensaver_view(&clock, &calendar_availability, &theme);
+                macroquad::window::next_frame().await;
+                continue;
+            }
         }
 
-        let weather_state = weather_store.state(now_utc);
+        let screen_width = macroquad::window::screen_width();
+        let auto_competition_id = standings_rotation.active_competition(now_utc);
+
+        let mut weather_state = weather_store.state(now_utc);
+        let mut station_states: Vec<DeparturesPanelState> = stations
+            .iter()
+            .map(|station| departures_board.station_state(station, now_utc))
+            .collect();
+        let mut active_competition_index = resolve_competition_index(
+            &competition_ids,
+            auto_competition_id,
+            touch_state.football_index,
+        );
+        let mut active_competition_id = competition_ids[active_competition_index];
+        let mut standings_state = standings_board.competition_state(active_competition_id, now_utc);
+
+        let layout_inputs: Vec<StationLayoutInput<'_>> = stations
+            .iter()
+            .zip(station_states.iter())
+            .map(|(station, state)| StationLayoutInput {
+                site_id: station.site_id,
+                state,
+            })
+            .collect();
+
+        let mut layout = compute_dashboard_layout(
+            screen_width,
+            matches!(weather_state, WeatherPanelState::Stale { .. }),
+            &layout_inputs,
+            touch_state.expanded_departure.as_deref(),
+            matches!(standings_state, StandingsPanelState::Stale { .. }),
+            competition_ids.len(),
+            active_competition_index,
+            active_competition_id,
+        );
+
+        let mut state_updated = false;
+        for (tap_x, tap_y) in taps {
+            if let Some(target) = hit_test(&layout, tap_x, tap_y) {
+                let (next_state, effects) = apply_touch(
+                    &touch_state,
+                    DisplayContext::Dashboard,
+                    target,
+                    now_utc,
+                    &touch_config,
+                );
+                touch_state = next_state;
+                state_updated = true;
+
+                for effect in effects {
+                    if let TouchEffect::RequestPanelRefetch { provider } = effect {
+                        let _ = apply_panel_refetch(
+                            &provider,
+                            now_utc,
+                            &mut weather_store,
+                            &mut departures_board,
+                            &mut standings_board,
+                        );
+                    }
+                }
+            }
+        }
+
+        if state_updated {
+            weather_state = weather_store.state(now_utc);
+            station_states = stations
+                .iter()
+                .map(|station| departures_board.station_state(station, now_utc))
+                .collect();
+            active_competition_index = resolve_competition_index(
+                &competition_ids,
+                auto_competition_id,
+                touch_state.football_index,
+            );
+            active_competition_id = competition_ids[active_competition_index];
+            standings_state = standings_board.competition_state(active_competition_id, now_utc);
+
+            let updated_inputs: Vec<StationLayoutInput<'_>> = stations
+                .iter()
+                .zip(station_states.iter())
+                .map(|(station, state)| StationLayoutInput {
+                    site_id: station.site_id,
+                    state,
+                })
+                .collect();
+
+            layout = compute_dashboard_layout(
+                screen_width,
+                matches!(weather_state, WeatherPanelState::Stale { .. }),
+                &updated_inputs,
+                touch_state.expanded_departure.as_deref(),
+                matches!(standings_state, StandingsPanelState::Stale { .. }),
+                competition_ids.len(),
+                active_competition_index,
+                active_competition_id,
+            );
+        }
+
         render_clock_weather_header(&clock, &weather_state, &theme);
+
+        for ((station, state), top) in stations
+            .iter()
+            .zip(station_states.iter())
+            .zip(layout.station_tops.iter().copied())
+        {
+            let _ = render_departures_panel_with_header(
+                &station.name,
+                station.site_id,
+                state,
+                top,
+                touch_state.expanded_departure.as_deref(),
+                &theme,
+            );
+        }
 
         let today = Date::new(clock.year, clock.month as i8, clock.day as i8)
             .expect("local clock must yield a valid calendar date");
@@ -504,20 +599,264 @@ async fn main() {
             daylight_date = Some(today);
         }
         if let Some(window) = &daylight {
-            render_daylight_strip(window, &theme);
+            let _ = render_daylight_strip_at(window, layout.daylight_top, &theme);
         }
 
-        let mut panel_top = 140.0;
-        for station in &stations {
-            let departures_state = departures_board.station_state(station, now_utc);
-            render_departures_panel(&departures_state, panel_top, &theme);
-            panel_top += STATION_PANEL_HEIGHT;
-        }
+        render_standings_panel(
+            active_competition_id,
+            &standings_state,
+            layout.standings_top,
+            &theme,
+        );
 
-        let active_competition_id = standings_rotation.active_competition(now_utc);
-        let standings_state = standings_board.competition_state(active_competition_id, now_utc);
-        render_standings_panel(active_competition_id, &standings_state, panel_top, &theme);
+        render_calendar_availability_note(
+            &calendar_availability,
+            macroquad::window::screen_height() - 20.0,
+            &theme,
+        );
 
         macroquad::window::next_frame().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_phase_transitions_at_expected_boundaries() {
+        assert_eq!(demo_phase(Duration::seconds(0)), DemoPhase::Unavailable);
+        assert_eq!(demo_phase(Duration::seconds(9)), DemoPhase::Unavailable);
+        assert_eq!(demo_phase(Duration::seconds(10)), DemoPhase::Fresh);
+        assert_eq!(demo_phase(Duration::seconds(199)), DemoPhase::Fresh);
+        assert_eq!(demo_phase(Duration::seconds(200)), DemoPhase::Stale);
+        assert_eq!(demo_phase(Duration::seconds(214)), DemoPhase::Stale);
+        assert_eq!(demo_phase(Duration::seconds(215)), DemoPhase::Fresh);
+        assert_eq!(demo_phase(Duration::seconds(239)), DemoPhase::Fresh);
+    }
+
+    #[test]
+    fn fixture_duvbo_departures_generate_expected_metro_departures_relative_to_now() {
+        let now = datetime!(2026-11-24 20:00:00 UTC);
+        let departures = fixture_duvbo_departures(now);
+
+        assert_eq!(departures.len(), 2);
+        assert_eq!(departures[0].destination, "Kungsträdgården");
+        assert_eq!(departures[0].transport_mode, TransitMode::Metro);
+        assert_eq!(departures[0].line_designation, "10");
+        assert_eq!(departures[0].scheduled, now + Duration::minutes(14));
+        assert_eq!(departures[0].expected, Some(now + Duration::minutes(14)));
+
+        assert_eq!(departures[1].destination, "Hjulsta");
+        assert_eq!(departures[1].transport_mode, TransitMode::Metro);
+        assert_eq!(departures[1].line_designation, "10");
+        assert_eq!(departures[1].scheduled, now + Duration::minutes(2));
+        assert_eq!(departures[1].expected, Some(now + Duration::minutes(2)));
+    }
+
+    #[test]
+    fn fixture_sundbyberg_departures_generate_expected_train_departure_relative_to_now() {
+        let now = datetime!(2026-11-24 20:00:00 UTC);
+        let departures = fixture_sundbyberg_departures(now);
+
+        assert_eq!(departures.len(), 1);
+        assert_eq!(departures[0].destination, "Stockholm Central");
+        assert_eq!(departures[0].transport_mode, TransitMode::Train);
+        assert_eq!(departures[0].line_designation, "40");
+        assert_eq!(departures[0].scheduled, now + Duration::minutes(18));
+        assert_eq!(departures[0].expected, Some(now + Duration::minutes(18)));
+    }
+
+    #[test]
+    fn fixture_calendar_events_align_with_demo_screensaver_window() {
+        let cycle_start = datetime!(2026-11-24 20:00:00 UTC);
+        let events = fixture_calendar_events(cycle_start);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start, cycle_start + DEMO_SCREENSAVER_FROM);
+        assert_eq!(events[0].end, cycle_start + DEMO_SCREENSAVER_UNTIL);
+        assert!(DEMO_UNAVAILABLE_UNTIL < DEMO_SCREENSAVER_FROM);
+        assert!(DEMO_SCREENSAVER_UNTIL < DEMO_STALE_FROM);
+        assert!(DEMO_STALE_UNTIL < DEMO_CYCLE_LENGTH);
+
+        let rules = fixture_screensaver_rules();
+        let mut poll_state = CalendarPollState::new();
+        refresh_fixture_calendar(
+            &mut poll_state,
+            &rules,
+            cycle_start,
+            cycle_start + DEMO_SCREENSAVER_FROM,
+        );
+        assert!(poll_state.screensaver_active());
+
+        refresh_fixture_calendar(
+            &mut poll_state,
+            &rules,
+            cycle_start,
+            cycle_start + DEMO_SCREENSAVER_UNTIL,
+        );
+        assert!(!poll_state.screensaver_active());
+    }
+
+    #[test]
+    fn refresh_fixture_departures_records_deviations_timestamp() {
+        let now = datetime!(2026-11-24 20:00:00 UTC);
+        let fetched_at = now - Duration::seconds(30);
+        let mut board = DeparturesBoard::new();
+
+        refresh_fixture_departures(&mut board, now, fetched_at);
+
+        let snapshot = board.export_snapshot();
+        assert_eq!(snapshot.deviations.len(), 2);
+        for site in snapshot.deviations {
+            assert_eq!(site.fetched_at_unix, Some(fetched_at.unix_timestamp()));
+        }
+    }
+
+    #[test]
+    fn resolve_competition_index_uses_active_id_when_no_override() {
+        let ids = [ALLSVENSKAN_ID, SERIE_A_ID];
+
+        assert_eq!(resolve_competition_index(&ids, ALLSVENSKAN_ID, None), 0);
+        assert_eq!(resolve_competition_index(&ids, SERIE_A_ID, None), 1);
+        assert_eq!(resolve_competition_index(&ids, "unknown", None), 0);
+        assert_eq!(resolve_competition_index(&[], ALLSVENSKAN_ID, None), 0);
+    }
+
+    #[test]
+    fn resolve_competition_index_applies_override_and_wraps_out_of_bounds() {
+        let ids = [ALLSVENSKAN_ID, SERIE_A_ID];
+
+        assert_eq!(resolve_competition_index(&ids, ALLSVENSKAN_ID, Some(1)), 1);
+        assert_eq!(resolve_competition_index(&ids, SERIE_A_ID, Some(0)), 0);
+        assert_eq!(resolve_competition_index(&ids, ALLSVENSKAN_ID, Some(2)), 0);
+        assert_eq!(resolve_competition_index(&ids, ALLSVENSKAN_ID, Some(5)), 1);
+        assert_eq!(resolve_competition_index(&[], ALLSVENSKAN_ID, Some(3)), 0);
+    }
+
+    #[test]
+    fn apply_panel_refetch_refreshes_matching_stale_provider_to_fresh() {
+        let now = datetime!(2026-11-24 20:00:00 UTC);
+        let mut weather_store = WeatherSnapshotStore::new();
+        let mut departures_board = DeparturesBoard::new();
+        let mut standings_board = StandingsBoard::new();
+
+        refresh_fixture_weather(
+            &mut weather_store,
+            now - WEATHER_STALE_AFTER - Duration::minutes(5),
+            now,
+        );
+        refresh_fixture_departures(
+            &mut departures_board,
+            now,
+            now - DEPARTURES_STALE_AFTER - Duration::minutes(1),
+        );
+        refresh_fixture_standings(
+            &mut standings_board,
+            now - STANDINGS_STALE_AFTER - Duration::hours(1),
+        );
+
+        let duvbo = Station {
+            site_id: DUVBO_SITE_ID,
+            name: "Duvbo".to_string(),
+            mode: TransitMode::Metro,
+            walk_time_min: 10,
+            direction: "stockholm".to_string(),
+        };
+        let sundbyberg = Station {
+            site_id: SUNDBYBERG_SITE_ID,
+            name: "Sundbyberg".to_string(),
+            mode: TransitMode::Train,
+            walk_time_min: 15,
+            direction: "stockholm".to_string(),
+        };
+
+        assert!(matches!(
+            weather_store.state(now),
+            WeatherPanelState::Stale { .. }
+        ));
+        assert!(apply_panel_refetch(
+            "weather",
+            now,
+            &mut weather_store,
+            &mut departures_board,
+            &mut standings_board,
+        ));
+        assert!(matches!(
+            weather_store.state(now),
+            WeatherPanelState::Fresh { .. }
+        ));
+
+        assert!(matches!(
+            departures_board.station_state(&duvbo, now),
+            DeparturesPanelState::Stale { .. }
+        ));
+        assert!(apply_panel_refetch(
+            "departures:9324",
+            now,
+            &mut weather_store,
+            &mut departures_board,
+            &mut standings_board,
+        ));
+        assert!(matches!(
+            departures_board.station_state(&duvbo, now),
+            DeparturesPanelState::Fresh(_)
+        ));
+        assert!(matches!(
+            departures_board.station_state(&sundbyberg, now),
+            DeparturesPanelState::Stale { .. }
+        ));
+
+        assert!(apply_panel_refetch(
+            "departures:9325",
+            now,
+            &mut weather_store,
+            &mut departures_board,
+            &mut standings_board,
+        ));
+        assert!(matches!(
+            departures_board.station_state(&sundbyberg, now),
+            DeparturesPanelState::Fresh(_)
+        ));
+
+        assert!(matches!(
+            standings_board.competition_state(ALLSVENSKAN_ID, now),
+            StandingsPanelState::Stale { .. }
+        ));
+        assert!(apply_panel_refetch(
+            "standings:allsvenskan",
+            now,
+            &mut weather_store,
+            &mut departures_board,
+            &mut standings_board,
+        ));
+        assert!(matches!(
+            standings_board.competition_state(ALLSVENSKAN_ID, now),
+            StandingsPanelState::Fresh(_)
+        ));
+        assert!(matches!(
+            standings_board.competition_state(SERIE_A_ID, now),
+            StandingsPanelState::Stale { .. }
+        ));
+
+        assert!(apply_panel_refetch(
+            "standings:serie-a",
+            now,
+            &mut weather_store,
+            &mut departures_board,
+            &mut standings_board,
+        ));
+        assert!(matches!(
+            standings_board.competition_state(SERIE_A_ID, now),
+            StandingsPanelState::Fresh(_)
+        ));
+
+        assert!(!apply_panel_refetch(
+            "unknown:provider",
+            now,
+            &mut weather_store,
+            &mut departures_board,
+            &mut standings_board,
+        ));
     }
 }

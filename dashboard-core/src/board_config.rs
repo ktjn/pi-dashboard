@@ -1,5 +1,5 @@
 use crate::touch::TouchConfig;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 use time::Time;
@@ -85,7 +85,7 @@ struct RawTouch {
     idle_timeout_seconds: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransitMode {
     Metro,
     Train,
@@ -276,6 +276,12 @@ fn validate(raw: RawBoardConfig) -> Result<BoardConfig, BoardConfigError> {
             "location.time_zone: must not be blank".to_string(),
         ));
     }
+    if jiff::tz::TimeZone::get(&raw.location.time_zone).is_err() {
+        return Err(BoardConfigError::Invalid(format!(
+            "location.time_zone: '{}' is not a recognized IANA time zone",
+            raw.location.time_zone
+        )));
+    }
     if !(-90.0..=90.0).contains(&raw.location.latitude) {
         return Err(BoardConfigError::Invalid(format!(
             "location.latitude: {} is out of range [-90, 90]",
@@ -384,6 +390,14 @@ fn validate(raw: RawBoardConfig) -> Result<BoardConfig, BoardConfigError> {
                         rule.match_type
                     ))
                 })?;
+                if match_type == MatchType::Regex {
+                    regex::Regex::new(&rule.pattern).map_err(|error| {
+                        BoardConfigError::Invalid(format!(
+                            "screensaver.rules[{index}].pattern: '{}' is not a valid regex: {error}",
+                            rule.pattern
+                        ))
+                    })?;
+                }
                 rules.push(ScreensaverRule {
                     pattern: rule.pattern,
                     match_type,
@@ -421,7 +435,9 @@ fn validate(raw: RawBoardConfig) -> Result<BoardConfig, BoardConfigError> {
 
     let touch = match raw.touch {
         Some(touch) => {
-            let wake_seconds = touch.wake_seconds.unwrap_or(TouchConfig::DEFAULT_WAKE_SECONDS);
+            let wake_seconds = touch
+                .wake_seconds
+                .unwrap_or(TouchConfig::DEFAULT_WAKE_SECONDS);
             let screensaver_dismiss_seconds = touch
                 .screensaver_dismiss_seconds
                 .unwrap_or(TouchConfig::DEFAULT_SCREENSAVER_DISMISS_SECONDS);

@@ -1,8 +1,8 @@
 use dashboard_core::board_config::{MatchType, ScreensaverRule};
 use dashboard_core::screensaver::{
-    CalendarAvailability, CalendarEvent, CalendarFetchError, CalendarPollState, CalendarSource,
-    FixtureCalendarSource, evaluate_screensaver_rules, parse_google_calendar_events_response,
-    poll_calendar,
+    CALENDAR_STALE_AFTER, CalendarAvailability, CalendarCacheSnapshot, CalendarEvent,
+    CalendarFetchError, CalendarPollState, CalendarSource, FixtureCalendarSource,
+    evaluate_screensaver_rules, parse_google_calendar_events_response, poll_calendar,
 };
 use std::collections::HashMap;
 use time::Duration;
@@ -354,4 +354,31 @@ fn fixture_calendar_source_reports_missing_data_for_an_unconfigured_calendar() {
     let mut source: Box<dyn CalendarSource> = Box::new(FixtureCalendarSource::new(HashMap::new()));
     let error = source.fetch_events("unknown").unwrap_err();
     assert!(matches!(error, CalendarFetchError::MissingData(_)));
+}
+
+#[test]
+fn snapshot_round_trips_through_json_preserving_activation_and_staleness() {
+    let mut state = CalendarPollState::new();
+    let recorded_at = datetime!(2026-11-24 13:00:00 UTC);
+    state.record_success(true, recorded_at);
+
+    let exported = state.export_snapshot();
+    let json = serde_json::to_string(&exported).expect("must serialize");
+    let decoded: CalendarCacheSnapshot = serde_json::from_str(&json).expect("must deserialize");
+
+    let mut restored = CalendarPollState::new();
+    restored.restore_snapshot(decoded);
+
+    assert!(restored.screensaver_active());
+    assert_eq!(
+        restored.availability(recorded_at + Duration::minutes(1)),
+        CalendarAvailability::Fresh
+    );
+    let stale_now = recorded_at + CALENDAR_STALE_AFTER + Duration::seconds(1);
+    assert_eq!(
+        restored.availability(stale_now),
+        CalendarAvailability::Stale {
+            age: stale_now - recorded_at,
+        }
+    );
 }

@@ -1,3 +1,4 @@
+use crate::atomic_fs;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -7,16 +8,16 @@ use axum::{Json, Router};
 use dashboard_core::departures::DeparturesPanelState;
 use dashboard_core::schedule::{
     DisplayState, OverridePower, OverrideState, active_override_power, is_within_display_window,
-    next_window_boundary, reconcile,
+    next_window_boundary, reconcile, resolved_power,
 };
 use dashboard_core::screensaver::CalendarPollState;
 use dashboard_core::standings::StandingsPanelState;
+use dashboard_core::touch::{TouchMode, TouchState};
 use dashboard_core::weather::WeatherPanelState;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use time::OffsetDateTime;
@@ -85,15 +86,6 @@ impl fmt::Display for OverrideFileError {
 
 impl std::error::Error for OverrideFileError {}
 
-/// Writes the override file atomically: serialize to a temp file in the
-/// same directory, then `rename` over the real path. `rename` on both
-/// Windows and POSIX replaces the destination in a single filesystem
-/// operation, so a concurrent reader (the display-power reconciliation
-/// thread, reading once a tick) only ever observes the file in its
-/// complete old state or its complete new state - never a partially
-/// written one. This is `req-override-concurrency`'s real mitigation: the
-/// reconciler always reads a consistent override state because there is no
-/// instant at which the file on disk is half-written.
 fn write_override_atomic(
     path: &Path,
     power: OverridePower,
@@ -111,30 +103,8 @@ fn write_override_atomic(
     let contents = serde_json::to_vec(&file)
         .map_err(|error| OverrideFileError::Malformed(error.to_string()))?;
 
-    let tmp_path = tmp_path_for(path);
-    std::fs::write(&tmp_path, &contents)
-        .map_err(|error| OverrideFileError::Io(error.to_string()))?;
-    std::fs::rename(&tmp_path, path).map_err(|error| OverrideFileError::Io(error.to_string()))?;
-    Ok(())
-}
-
-/// Per-call unique counter mixed into every temp-file name `tmp_path_for`
-/// produces. A single fixed `<path>.tmp` name is unsafe under concurrent
-/// writers: two `POST /control` requests landing on different `axum`/tokio
-/// workers can interleave as `A:write(tmp) -> B:write(tmp) -> A:rename(tmp
-/// -> path) -> B:rename(tmp -> path)`, where B's temp file has already been
-/// renamed away by A by the time B tries to rename it, producing a spurious
-/// I/O error (`ENOENT` on POSIX, "Access denied" on Windows) instead of a
-/// successful write. Mixing in the process id as well keeps names unique
-/// even across process restarts that might race on counter reuse.
-static TMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn tmp_path_for(path: &Path) -> PathBuf {
-    let pid = std::process::id();
-    let unique = TMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".{pid}.{unique}.tmp"));
-    PathBuf::from(tmp)
+    atomic_fs::write_bytes_atomic(path, &contents)
+        .map_err(|error| OverrideFileError::Io(error.to_string()))
 }
 
 /// Removes the override file for a `"clear"` action. A missing file is not
@@ -168,6 +138,9 @@ pub fn read_override_state(path: &Path) -> Option<OverrideState> {
 pub struct RemoteControlState {
     pub expected_token: Arc<String>,
     pub override_path: Arc<PathBuf>,
+    pub override_cache: Arc<Mutex<Option<OverrideState>>>,
+    pub touch_state: Arc<Mutex<TouchState>>,
+    pub now: Arc<dyn Fn() -> OffsetDateTime + Send + Sync>,
     pub time_zone: Arc<String>,
     pub display_windows: Arc<Vec<dashboard_core::board_config::DisplayWindow>>,
     pub stations: Arc<Vec<dashboard_core::board_config::Station>>,
@@ -198,15 +171,21 @@ async fn index_handler() -> Html<&'static str> {
     Html(include_str!("../web/control.html"))
 }
 
-/// Bearer-token check, applied by hand inside each handler rather than as
-/// separate `axum` middleware - with only two routes, a shared helper gives
-/// the same guarantee (`req-remote-control-security`: "the control endpoint
-/// rejects any request without a valid bearer token") without pulling in
-/// `axum::middleware`'s extra indirection. The token is read once per
-/// request from the already-resolved `expected_token` (sourced from the
-/// environment at startup, never from the repo) and never logged - only
-/// whether it matched.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let a = left.get(index).copied().unwrap_or(0);
+        let b = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(a ^ b);
+    }
+    diff == 0
+}
+
 fn authorize(headers: &HeaderMap, expected_token: &str) -> bool {
+    if expected_token.is_empty() {
+        return false;
+    }
     let Some(header_value) = headers.get(header::AUTHORIZATION) else {
         return false;
     };
@@ -216,7 +195,7 @@ fn authorize(headers: &HeaderMap, expected_token: &str) -> bool {
     let Some(presented) = header_str.strip_prefix("Bearer ") else {
         return false;
     };
-    presented == expected_token
+    constant_time_eq(presented.as_bytes(), expected_token.as_bytes())
 }
 
 async fn control_handler(
@@ -240,29 +219,62 @@ async fn control_handler(
             .into_response();
     };
 
-    let now_utc = OffsetDateTime::now_utc();
-    let write_result = match action {
-        OverrideAction::Clear => clear_override_file(&state.override_path),
+    let now_utc = (state.now)();
+    let override_path = Arc::clone(&state.override_path);
+    let updated_override = match action {
+        OverrideAction::Clear => {
+            let join_result =
+                tokio::task::spawn_blocking(move || clear_override_file(&override_path)).await;
+            match join_result {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => {
+                    eprintln!("override file clear failed: {error}");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+                }
+                Err(error) => {
+                    eprintln!("override file clear task failed: {error}");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+                }
+            }
+        }
         OverrideAction::On | OverrideAction::Off => {
             let power = if action == OverrideAction::On {
                 OverridePower::On
             } else {
                 OverridePower::Off
             };
-            match next_window_boundary(&state.display_windows, &state.time_zone, now_utc) {
-                Ok(expires_at) => write_override_atomic(&state.override_path, power, expires_at),
+            let expires_at =
+                match next_window_boundary(&state.display_windows, &state.time_zone, now_utc) {
+                    Ok(expires_at) => expires_at,
+                    Err(error) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                            .into_response();
+                    }
+                };
+            let join_result = tokio::task::spawn_blocking(move || {
+                write_override_atomic(&override_path, power, expires_at)
+            })
+            .await;
+            match join_result {
+                Ok(Ok(())) => Some(OverrideState { power, expires_at }),
+                Ok(Err(error)) => {
+                    eprintln!("override file write failed: {error}");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+                }
                 Err(error) => {
+                    eprintln!("override file write task failed: {error}");
                     return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
                 }
             }
         }
     };
-    if let Err(error) = write_result {
-        eprintln!("override file write failed: {error}");
-        return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
-    }
 
-    Json(build_status_report(&state, now_utc)).into_response()
+    *state
+        .override_cache
+        .lock()
+        .expect("override cache mutex poisoned") = updated_override;
+
+    Json(build_status_report(&state, updated_override, now_utc)).into_response()
 }
 
 async fn status_handler(State(state): State<RemoteControlState>, headers: HeaderMap) -> Response {
@@ -270,8 +282,22 @@ async fn status_handler(State(state): State<RemoteControlState>, headers: Header
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let now_utc = OffsetDateTime::now_utc();
-    Json(build_status_report(&state, now_utc)).into_response()
+    let override_path = Arc::clone(&state.override_path);
+    let override_state =
+        match tokio::task::spawn_blocking(move || read_override_state(&override_path)).await {
+            Ok(override_state) => override_state,
+            Err(error) => {
+                eprintln!("override file read task failed: {error}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+            }
+        };
+    *state
+        .override_cache
+        .lock()
+        .expect("override cache mutex poisoned") = override_state;
+
+    let now_utc = (state.now)();
+    Json(build_status_report(&state, override_state, now_utc)).into_response()
 }
 
 fn panel_freshness_label(label: &str, fresh: bool, stale: bool) -> String {
@@ -285,15 +311,11 @@ fn panel_freshness_label(label: &str, fresh: bool, stale: bool) -> String {
     format!("{label}={status}")
 }
 
-/// Builds `status-report` from each panel's already-tracked
-/// Fresh/Stale/Unavailable state (`req-remote-control-observability`:
-/// "status reports include per-panel data freshness, uptime and deployed
-/// version"). `panel_freshness` is a plain string (`spec.yaml`'s
-/// `status-report` data model declares it as `string`, not a nested
-/// object), so panels are joined as `name=status` pairs rather than
-/// re-encoding a second JSON document inside the field.
-fn build_status_report(state: &RemoteControlState, now_utc: OffsetDateTime) -> StatusReport {
-    let override_state = read_override_state(&state.override_path);
+fn build_status_report(
+    state: &RemoteControlState,
+    override_state: Option<OverrideState>,
+    now_utc: OffsetDateTime,
+) -> StatusReport {
     let override_active = active_override_power(override_state, now_utc);
     let screensaver_active = state
         .calendar_poll_state
@@ -304,11 +326,23 @@ fn build_status_report(state: &RemoteControlState, now_utc: OffsetDateTime) -> S
         is_within_display_window(&state.display_windows, &state.time_zone, now_utc).unwrap_or(true);
     let display_state = reconcile(schedule_says_awake, override_active, screensaver_active);
 
-    let state_label = match display_state {
-        DisplayState::Normal => "normal",
-        DisplayState::ScheduledStandby => "scheduled-standby",
-        DisplayState::ManualOverride(_) => "manual-override",
-        DisplayState::Screensaver => "screensaver",
+    let touch_wake_active = {
+        let touch = state
+            .touch_state
+            .lock()
+            .expect("touch state mutex poisoned");
+        touch.mode == TouchMode::Wake && touch.wake_until.is_some_and(|until| until > now_utc)
+    };
+
+    let state_label = if touch_wake_active && !resolved_power(display_state) {
+        "touch-wake"
+    } else {
+        match display_state {
+            DisplayState::Normal => "normal",
+            DisplayState::ScheduledStandby => "scheduled-standby",
+            DisplayState::ManualOverride(_) => "manual-override",
+            DisplayState::Screensaver => "screensaver",
+        }
     };
 
     let weather = state
@@ -430,9 +464,26 @@ mod tests {
         expected_token: &str,
         display_windows: Vec<dashboard_core::board_config::DisplayWindow>,
     ) -> RemoteControlState {
+        test_state_with_clock(
+            override_path,
+            expected_token,
+            display_windows,
+            Arc::new(OffsetDateTime::now_utc),
+        )
+    }
+
+    fn test_state_with_clock(
+        override_path: PathBuf,
+        expected_token: &str,
+        display_windows: Vec<dashboard_core::board_config::DisplayWindow>,
+        now: Arc<dyn Fn() -> OffsetDateTime + Send + Sync>,
+    ) -> RemoteControlState {
         RemoteControlState {
             expected_token: Arc::new(expected_token.to_string()),
             override_path: Arc::new(override_path),
+            override_cache: Arc::new(Mutex::new(None)),
+            touch_state: Arc::new(Mutex::new(TouchState::new())),
+            now,
             time_zone: Arc::new("Europe/Stockholm".to_string()),
             display_windows: Arc::new(display_windows),
             stations: Arc::new(Vec::new()),
@@ -443,6 +494,13 @@ mod tests {
             calendar_poll_state: Arc::new(Mutex::new(CalendarPollState::new())),
             started_at: Instant::now(),
         }
+    }
+
+    fn wednesday_midday_utc() -> OffsetDateTime {
+        let date =
+            time::Date::from_calendar_date(2026, time::Month::November, 25).expect("valid date");
+        let time_of_day = time::Time::from_hms(10, 0, 0).expect("valid time");
+        time::PrimitiveDateTime::new(date, time_of_day).assume_utc()
     }
 
     async fn body_bytes(response: Response) -> Vec<u8> {
@@ -753,7 +811,13 @@ mod tests {
     #[tokio::test]
     async fn status_reports_normal_state_when_nothing_else_is_active() {
         let override_path = unique_override_path("status-normal");
-        let state = test_state(override_path, "secret-token");
+        let fixed_now = wednesday_midday_utc();
+        let state = test_state_with_clock(
+            override_path,
+            "secret-token",
+            weekday_windows(),
+            Arc::new(move || fixed_now),
+        );
         let router = remote_control_router(state);
         let request = Request::builder()
             .method("GET")
@@ -765,6 +829,7 @@ mod tests {
         let bytes = body_bytes(response).await;
         let report: StatusReport =
             serde_json::from_slice(&bytes).expect("response must be a valid status-report");
+        assert_eq!(report.state, "normal");
         assert!(report.panel_freshness.contains("weather="));
         assert!(report.panel_freshness.contains("departures="));
         assert!(report.panel_freshness.contains("standings="));
@@ -775,10 +840,6 @@ mod tests {
 
     #[tokio::test]
     async fn status_reports_scheduled_standby_when_no_window_is_configured() {
-        // No configured display windows means `is_within_display_window`
-        // is always `false`, regardless of the real wall-clock time the
-        // test happens to run at - this keeps the test deterministic
-        // without needing to inject "now" through the HTTP layer.
         let override_path = unique_override_path("status-standby");
         let state = test_state_with_windows(override_path, "secret-token", Vec::new());
         let router = remote_control_router(state);
@@ -797,29 +858,19 @@ mod tests {
 
     #[tokio::test]
     async fn status_reports_screensaver_when_the_schedule_is_awake_and_the_screensaver_is_active() {
-        // A window spanning the whole day in both day-types makes
-        // `is_within_display_window` `true` at any wall-clock time the
-        // test happens to run at, so only `screensaver_active` decides
-        // the outcome.
-        let all_day_windows = vec![
-            dashboard_core::board_config::DisplayWindow {
-                day_type: DayType::Weekday,
-                start: time::Time::from_hms(0, 0, 0).expect("valid time"),
-                end: time::Time::from_hms(23, 59, 59).expect("valid time"),
-            },
-            dashboard_core::board_config::DisplayWindow {
-                day_type: DayType::Weekend,
-                start: time::Time::from_hms(0, 0, 0).expect("valid time"),
-                end: time::Time::from_hms(23, 59, 59).expect("valid time"),
-            },
-        ];
         let override_path = unique_override_path("status-screensaver");
-        let state = test_state_with_windows(override_path, "secret-token", all_day_windows);
+        let fixed_now = wednesday_midday_utc();
+        let state = test_state_with_clock(
+            override_path,
+            "secret-token",
+            weekday_windows(),
+            Arc::new(move || fixed_now),
+        );
         state
             .calendar_poll_state
             .lock()
             .expect("calendar poll state mutex poisoned")
-            .record_success(true, OffsetDateTime::now_utc());
+            .record_success(true, fixed_now);
         let router = remote_control_router(state);
         let request = Request::builder()
             .method("GET")
@@ -832,6 +883,239 @@ mod tests {
         let report: StatusReport =
             serde_json::from_slice(&bytes).expect("response must be a valid status-report");
         assert_eq!(report.state, "screensaver");
+    }
+
+    #[test]
+    fn authorize_rejects_empty_expected_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer ".parse().expect("valid header"),
+        );
+        assert!(!authorize(&headers, ""));
+    }
+
+    #[test]
+    fn constant_time_eq_compares_equal_and_unequal_slices() {
+        assert!(constant_time_eq(b"secret-token", b"secret-token"));
+        assert!(!constant_time_eq(b"secret-token", b"secret-tokeN"));
+        assert!(!constant_time_eq(b"secret", b"secret-token"));
+        assert!(!constant_time_eq(b"secret-token", b"secret"));
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(!constant_time_eq(b"a", b""));
+        assert!(!constant_time_eq(b"abc", b"abc\0"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[tokio::test]
+    async fn status_version_reflects_running_binary_not_staged_candidate() {
+        let override_path = unique_override_path("status-version-not-staged");
+        let suffix = UNIQUE_SUFFIX.fetch_add(1, Ordering::Relaxed);
+        let staging_dir = std::env::temp_dir().join(format!(
+            "pi-dashboard-status-version-staging-{}-{suffix}",
+            std::process::id()
+        ));
+        let staged_version_path = staging_dir.join("staged-version.txt");
+
+        crate::update_agent::stage_bundle_atomic(&staging_dir, "v9.9.9", b"candidate-bundle")
+            .expect("staging bundle must succeed");
+        crate::atomic_fs::write_bytes_atomic(&staged_version_path, b"v9.9.9")
+            .expect("staged version file must write");
+
+        let fixed_now = wednesday_midday_utc();
+        let state = test_state_with_clock(
+            override_path,
+            "secret-token",
+            weekday_windows(),
+            Arc::new(move || fixed_now),
+        );
+        let router = remote_control_router(state);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .expect("request must build");
+        let response = router.oneshot(request).await.expect("router must respond");
+        assert_eq!(response.status(), StatusCode::OK);
+        let report: StatusReport = serde_json::from_slice(&body_bytes(response).await)
+            .expect("response must be a valid status-report");
+
+        let _ = std::fs::remove_dir_all(&staging_dir);
+
+        assert_eq!(report.version, env!("CARGO_PKG_VERSION"));
+        assert_ne!(report.version, "v9.9.9");
+    }
+
+    #[tokio::test]
+    async fn status_reports_touch_wake_during_standby_and_reverts_when_expired() {
+        let override_path = unique_override_path("status-touch-wake");
+        let current_time = Arc::new(Mutex::new(wednesday_midday_utc()));
+        let clock_ref = Arc::clone(&current_time);
+        let state = test_state_with_clock(
+            override_path,
+            "secret-token",
+            Vec::new(),
+            Arc::new(move || *clock_ref.lock().expect("clock mutex poisoned")),
+        );
+        {
+            let mut touch = state.touch_state.lock().expect("touch mutex poisoned");
+            touch.mode = TouchMode::Wake;
+            touch.wake_until = Some(wednesday_midday_utc() + time::Duration::seconds(120));
+        }
+
+        let router = remote_control_router(state.clone());
+        let request = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .expect("request must build");
+        let response = router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("router must respond");
+        let report: StatusReport = serde_json::from_slice(&body_bytes(response).await)
+            .expect("response must be a valid status-report");
+        assert_eq!(report.state, "touch-wake");
+
+        *current_time.lock().expect("clock mutex poisoned") =
+            wednesday_midday_utc() + time::Duration::seconds(121);
+        let expired_request = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .expect("request must build");
+        let expired_response = router
+            .oneshot(expired_request)
+            .await
+            .expect("router must respond");
+        let expired_report: StatusReport =
+            serde_json::from_slice(&body_bytes(expired_response).await)
+                .expect("response must be a valid status-report");
+        assert_eq!(expired_report.state, "scheduled-standby");
+    }
+
+    #[tokio::test]
+    async fn status_reports_touch_wake_during_manual_override_off_and_reverts_when_expired() {
+        let override_path = unique_override_path("status-touch-wake-override-off");
+        let base_now = wednesday_midday_utc();
+        write_override_atomic(
+            &override_path,
+            OverridePower::Off,
+            base_now + time::Duration::hours(2),
+        )
+        .expect("override write must succeed");
+        let current_time = Arc::new(Mutex::new(base_now));
+        let clock_ref = Arc::clone(&current_time);
+        let state = test_state_with_clock(
+            override_path.clone(),
+            "secret-token",
+            weekday_windows(),
+            Arc::new(move || *clock_ref.lock().expect("clock mutex poisoned")),
+        );
+        {
+            let mut touch = state.touch_state.lock().expect("touch mutex poisoned");
+            touch.mode = TouchMode::Wake;
+            touch.wake_until = Some(base_now + time::Duration::seconds(120));
+        }
+
+        let router = remote_control_router(state);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .expect("request must build");
+        let response = router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("router must respond");
+        let report: StatusReport = serde_json::from_slice(&body_bytes(response).await)
+            .expect("response must be a valid status-report");
+        assert_eq!(report.state, "touch-wake");
+
+        *current_time.lock().expect("clock mutex poisoned") =
+            base_now + time::Duration::seconds(120);
+        let expired_request = Request::builder()
+            .method("GET")
+            .uri("/status")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .expect("request must build");
+        let expired_response = router
+            .oneshot(expired_request)
+            .await
+            .expect("router must respond");
+        let expired_report: StatusReport =
+            serde_json::from_slice(&body_bytes(expired_response).await)
+                .expect("response must be a valid status-report");
+        assert_eq!(expired_report.state, "manual-override");
+
+        std::fs::remove_file(&override_path).ok();
+    }
+
+    #[tokio::test]
+    async fn control_updates_override_cache_on_write_and_clear() {
+        let override_path = unique_override_path("override-cache");
+        let fixed_now = wednesday_midday_utc();
+        let state = test_state_with_clock(
+            override_path.clone(),
+            "secret-token",
+            weekday_windows(),
+            Arc::new(move || fixed_now),
+        );
+        let router = remote_control_router(state.clone());
+
+        let off_request = Request::builder()
+            .method("POST")
+            .uri("/control")
+            .header("authorization", "Bearer secret-token")
+            .header("content-type", "application/json")
+            .body(Body::from("{\"action\":\"off\"}"))
+            .expect("request must build");
+        let off_response = router
+            .clone()
+            .oneshot(off_request)
+            .await
+            .expect("router must respond");
+        assert_eq!(off_response.status(), StatusCode::OK);
+        let cached = *state
+            .override_cache
+            .lock()
+            .expect("override cache mutex poisoned");
+        assert!(cached.is_some_and(|entry| entry.power == OverridePower::Off));
+
+        let clear_request = Request::builder()
+            .method("POST")
+            .uri("/control")
+            .header("authorization", "Bearer secret-token")
+            .header("content-type", "application/json")
+            .body(Body::from("{\"action\":\"clear\"}"))
+            .expect("request must build");
+        let clear_response = router
+            .oneshot(clear_request)
+            .await
+            .expect("router must respond");
+        assert_eq!(clear_response.status(), StatusCode::OK);
+        assert!(
+            state
+                .override_cache
+                .lock()
+                .expect("override cache mutex poisoned")
+                .is_none()
+        );
+        std::fs::remove_file(&override_path).ok();
+    }
+
+    #[test]
+    fn control_html_avoids_inner_html_and_clears_poll_interval() {
+        let html = include_str!("../web/control.html");
+        assert!(!html.contains("innerHTML"));
+        assert!(html.contains("clearInterval"));
     }
 
     #[tokio::test]

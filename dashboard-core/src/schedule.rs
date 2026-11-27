@@ -134,14 +134,6 @@ pub fn next_window_boundary(
     earliest.ok_or(ScheduleError::NoUpcomingBoundary)
 }
 
-/// The four states `spec.yaml`'s `remote-screen-control` capability names.
-/// `ManualOverride` and `Screensaver` have no real trigger wired up yet
-/// (PI-08 and PI-07 respectively) - `reconcile` already accepts them as
-/// inputs so those slices plug in without reshaping this enum or the
-/// priority logic below. `ManualOverride` carries the `OverridePower` that
-/// produced it, so a resolved state and the override direction it implies
-/// can never go out of sync between `reconcile` and `resolved_power`: there
-/// is no `(ManualOverride, None)` combination to misresolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayState {
     Normal,
@@ -150,34 +142,18 @@ pub enum DisplayState {
     Screensaver,
 }
 
-/// Which way an active manual override wants the backlight to go. PI-08's
-/// real override-file format isn't built yet; this is the minimal shape
-/// `reconcile` needs today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverridePower {
     On,
     Off,
 }
 
-/// An override read from the override file: the requested power direction
-/// plus the instant (computed by `next_window_boundary` at write time) at
-/// which it stops applying. Kept as plain data with no I/O of its own -
-/// `dashboard-pi` reads/writes the actual file; this type and
-/// `active_override_power` only decide whether an already-read value still
-/// counts as active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverrideState {
     pub power: OverridePower,
     pub expires_at: OffsetDateTime,
 }
 
-/// Resolves an optionally-present `OverrideState` into the `Option<OverridePower>`
-/// `reconcile` expects, treating an override whose `expires_at` has already
-/// passed as if it were absent. This is where
-/// `override_expires_at_next_schedule_boundary` actually takes effect: the
-/// caller does this check once, from a single already-read snapshot of the
-/// override file, before calling `reconcile` - so `reconcile` itself never
-/// needs to know about expiry.
 pub fn active_override_power(
     override_state: Option<OverrideState>,
     now_utc: OffsetDateTime,
@@ -187,26 +163,6 @@ pub fn active_override_power(
         .map(|state| state.power)
 }
 
-/// Decides the display state from already-resolved inputs for one instant.
-/// Pure function, no hidden state: `schedule_says_awake` is the result of
-/// `is_within_display_window`, `override_active` is a single already-read
-/// snapshot of the (future) override file, and `screensaver_active` is the
-/// (future) calendar-poll result. `req-override-concurrency`'s "the
-/// reconciler always reads a consistent override state" is satisfied by
-/// this signature's shape, not by anything `reconcile` does internally:
-/// the caller performs one atomic read of the override source before
-/// calling this function, and because `reconcile` is pure and takes that
-/// read as a plain value rather than re-reading the source itself, there is
-/// no window during this computation in which a concurrent override write
-/// could be partially observed - the whole call sees either the old value
-/// or the new one, never a mix.
-///
-/// Priority order: an active manual override always wins (it is, by
-/// definition, a deliberate temporary override of whatever the schedule or
-/// screensaver would otherwise decide - see `pi-dashboard-spec.md`'s PI-08
-/// section). Otherwise, `spec.yaml`'s `schedule-display-power` invariant
-/// `standby_overrides_screensaver` applies: the schedule saying "asleep"
-/// wins over an active screensaver.
 pub fn reconcile(
     schedule_says_awake: bool,
     override_active: Option<OverridePower>,
@@ -224,10 +180,6 @@ pub fn reconcile(
     DisplayState::Normal
 }
 
-/// Maps a resolved `DisplayState` to the actual backlight power boolean to
-/// hand to `DisplayPowerControl::set_power`. Kept separate from `reconcile`
-/// so the *reported* state (what `status-report`'s `state` field shows)
-/// and the *physical* power decision stay independently testable.
 pub fn resolved_power(state: DisplayState) -> bool {
     match state {
         DisplayState::ScheduledStandby => false,
@@ -253,21 +205,26 @@ impl fmt::Display for DisplayPowerError {
 
 impl std::error::Error for DisplayPowerError {}
 
-/// Seam a future hardware-integration slice fills in with real
-/// `wlr-randr` invocations (`req-resilience-backlight`, out of scope here -
-/// it needs the physical device/`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` from a
-/// systemd-timer context to verify).
 pub trait DisplayPowerControl {
     fn set_power(&mut self, on: bool) -> Result<(), DisplayPowerError>;
 }
 
-/// The only implementation that exists today: logs the decision instead of
-/// touching any hardware. Unlike `FixtureWeatherSource`/
-/// `FixtureDeparturesSource`, this is not gated behind the `fixtures`
-/// feature: there is no real backlight implementation yet for it to stand
-/// in for, so `dashboard-pi` uses it directly as its production
-/// implementation until a hardware-integration slice replaces it. Tests use
-/// it too.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LoggingDisplayPowerControl;
+
+impl LoggingDisplayPowerControl {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl DisplayPowerControl for LoggingDisplayPowerControl {
+    fn set_power(&mut self, on: bool) -> Result<(), DisplayPowerError> {
+        eprintln!("display power (logging backend): set_power({on})");
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct NullDisplayPowerControl {
     calls: Vec<bool>,

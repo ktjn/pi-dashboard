@@ -25,7 +25,10 @@ fn parses_the_github_latest_release_response_shape() {
     let release = parse_github_latest_release(json).expect("must parse");
     assert_eq!(release.version, "v1.2.3");
     assert_eq!(release.bundle_url, "https://example.invalid/bundle.tar.gz");
-    assert_eq!(release.digest_url, "https://example.invalid/bundle.tar.gz.sha256");
+    assert_eq!(
+        release.digest_url,
+        "https://example.invalid/bundle.tar.gz.sha256"
+    );
 }
 
 #[test]
@@ -104,11 +107,8 @@ fn a_bundle_whose_digest_matches_the_published_digest_is_staged() {
         candidate_version: Some("v1.1.0".to_string()),
         ..UpdateAgentState::starting_at("v1.0.0")
     };
-    let (next, outcome) = dashboard_core::update_agent::stage_if_digest_matches(
-        &state,
-        "deadbeef",
-        "deadbeef",
-    );
+    let (next, outcome) =
+        dashboard_core::update_agent::stage_if_digest_matches(&state, "deadbeef", "deadbeef");
     assert_eq!(outcome, DigestOutcome::Verified);
     assert_eq!(next.status, UpdateAgentStatus::Staged);
     assert_eq!(next.candidate_digest, Some("deadbeef".to_string()));
@@ -120,11 +120,8 @@ fn a_bundle_whose_digest_does_not_match_is_never_staged() {
         candidate_version: Some("v1.1.0".to_string()),
         ..UpdateAgentState::starting_at("v1.0.0")
     };
-    let (next, outcome) = dashboard_core::update_agent::stage_if_digest_matches(
-        &state,
-        "deadbeef",
-        "not-a-match",
-    );
+    let (next, outcome) =
+        dashboard_core::update_agent::stage_if_digest_matches(&state, "deadbeef", "not-a-match");
     assert_eq!(outcome, DigestOutcome::Mismatch);
     assert_eq!(next.status, UpdateAgentStatus::Idle);
     assert_eq!(next.candidate_version, None);
@@ -138,7 +135,10 @@ fn a_staged_candidate_activates_immediately_while_the_schedule_is_awake() {
         candidate_version: Some("v1.1.0".to_string()),
         ..UpdateAgentState::starting_at("v1.0.0")
     };
-    assert_eq!(decide_activation(&state, true), ActivationDecision::ActivateNow);
+    assert_eq!(
+        decide_activation(&state, true),
+        ActivationDecision::ActivateNow
+    );
 }
 
 #[test]
@@ -157,7 +157,10 @@ fn a_staged_candidate_defers_activation_during_scheduled_standby() {
 #[test]
 fn activation_is_not_ready_without_a_staged_candidate() {
     let state = UpdateAgentState::starting_at("v1.0.0");
-    assert_eq!(decide_activation(&state, true), ActivationDecision::NotReady);
+    assert_eq!(
+        decide_activation(&state, true),
+        ActivationDecision::NotReady
+    );
 }
 
 #[test]
@@ -200,4 +203,68 @@ fn a_failing_health_check_rolls_back_to_the_last_known_good_version() {
             restore_version: "v1.0.0".to_string()
         }
     );
+}
+
+#[test]
+fn version_comparison_normalizes_optional_leading_v() {
+    let now = datetime!(2026-11-27 10:00:00 UTC);
+
+    let state = UpdateAgentState::starting_at("0.1.0");
+    let (_, effect) = evaluate_candidate(&state, release("v0.1.0"), now);
+    assert_eq!(effect, PollEffect::NoAction);
+
+    let prefixed_state = UpdateAgentState::starting_at("v0.1.0");
+    let (_, effect) = evaluate_candidate(&prefixed_state, release("0.1.0"), now);
+    assert_eq!(effect, PollEffect::NoAction);
+
+    let rolled_back = UpdateAgentState {
+        candidate_version: Some("1.1.0".to_string()),
+        status: UpdateAgentStatus::RolledBack,
+        ..UpdateAgentState::starting_at("1.0.0")
+    };
+    let (_, effect) = evaluate_candidate(&rolled_back, release("v1.1.0"), now);
+    assert_eq!(effect, PollEffect::NoAction);
+}
+
+#[test]
+fn a_staged_candidate_is_not_redownloaded_or_reset_on_subsequent_polls() {
+    let now = datetime!(2026-11-27 10:00:00 UTC);
+    let staged = UpdateAgentState {
+        candidate_version: Some("v1.1.0".to_string()),
+        candidate_digest: Some("deadbeef".to_string()),
+        status: UpdateAgentStatus::Staged,
+        ..UpdateAgentState::starting_at("v1.0.0")
+    };
+
+    let (next, effect) = evaluate_candidate(&staged, release("v1.1.0"), now);
+    assert_eq!(effect, PollEffect::NoAction);
+    assert_eq!(next.status, UpdateAgentStatus::Staged);
+    assert_eq!(next.candidate_version, Some("v1.1.0".to_string()));
+    assert_eq!(next.candidate_digest, Some("deadbeef".to_string()));
+    assert_eq!(next.last_checked_at, Some(now));
+
+    let (next_unprefixed, effect_unprefixed) = evaluate_candidate(&staged, release("1.1.0"), now);
+    assert_eq!(effect_unprefixed, PollEffect::NoAction);
+    assert_eq!(next_unprefixed.status, UpdateAgentStatus::Staged);
+    assert_eq!(
+        next_unprefixed.candidate_digest,
+        Some("deadbeef".to_string())
+    );
+}
+
+#[test]
+fn a_staged_candidate_is_replaced_when_a_different_release_appears() {
+    let now = datetime!(2026-11-27 10:00:00 UTC);
+    let staged = UpdateAgentState {
+        candidate_version: Some("v1.1.0".to_string()),
+        candidate_digest: Some("deadbeef".to_string()),
+        status: UpdateAgentStatus::Staged,
+        ..UpdateAgentState::starting_at("v1.0.0")
+    };
+
+    let (next, effect) = evaluate_candidate(&staged, release("v1.2.0"), now);
+    assert_eq!(next.status, UpdateAgentStatus::Idle);
+    assert_eq!(next.candidate_version, Some("v1.2.0".to_string()));
+    assert_eq!(next.candidate_digest, None);
+    assert!(matches!(effect, PollEffect::DownloadRequested { .. }));
 }

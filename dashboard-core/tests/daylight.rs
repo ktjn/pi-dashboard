@@ -1,4 +1,4 @@
-use dashboard_core::daylight::{DaylightError, daylight_window};
+use dashboard_core::daylight::{DaylightError, DaylightWindow, daylight_window};
 use jiff::civil::date;
 
 // Stockholm (Duvbo-area) coordinates from board.toml's [location].
@@ -236,4 +236,37 @@ fn daylight_duration_is_never_negative_at_a_far_west_of_meridian_high_latitude_s
 
     assert!(window.sunset > window.sunrise);
     assert!(duration.get_hours() >= 0);
+}
+
+#[test]
+fn daylight_duration_uses_utc_instants_across_dst_transitions() {
+    let day = date(2026, 3, 29);
+    let spring_forward = DaylightWindow {
+        date: day,
+        civil_dawn: day.at(5, 30, 0, 0),
+        sunrise: day.at(6, 0, 0, 0),
+        sunset: day.at(19, 0, 0, 0),
+        civil_dusk: day.at(19, 30, 0, 0),
+        sunrise_utc: day.at(5, 0, 0, 0).in_tz("UTC").unwrap().timestamp(),
+        sunset_utc: day.at(17, 0, 0, 0).in_tz("UTC").unwrap().timestamp(),
+    };
+
+    let spring_duration = spring_forward.daylight_duration().expect("must compute");
+    assert_eq!(spring_duration.get_hours(), 12);
+    assert_eq!(spring_duration.get_minutes(), 0);
+
+    let fall_day = date(2026, 10, 25);
+    let fall_back = DaylightWindow {
+        date: fall_day,
+        civil_dawn: fall_day.at(5, 30, 0, 0),
+        sunrise: fall_day.at(6, 0, 0, 0),
+        sunset: fall_day.at(17, 0, 0, 0),
+        civil_dusk: fall_day.at(17, 30, 0, 0),
+        sunrise_utc: fall_day.at(4, 0, 0, 0).in_tz("UTC").unwrap().timestamp(),
+        sunset_utc: fall_day.at(16, 0, 0, 0).in_tz("UTC").unwrap().timestamp(),
+    };
+
+    let fall_duration = fall_back.daylight_duration().expect("must compute");
+    assert_eq!(fall_duration.get_hours(), 12);
+    assert_eq!(fall_duration.get_minutes(), 0);
 }

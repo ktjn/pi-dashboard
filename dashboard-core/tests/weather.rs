@@ -1,7 +1,8 @@
 use dashboard_core::clock::local_clock;
 use dashboard_core::weather::{
-    FixtureWeatherSource, WEATHER_STALE_AFTER, WeatherFetchError, WeatherPanelState,
-    WeatherReading, WeatherSnapshotStore, WeatherSource, parse_open_meteo_response,
+    FixtureWeatherSource, WEATHER_STALE_AFTER, WeatherCacheSnapshot, WeatherFetchError,
+    WeatherPanelState, WeatherReading, WeatherSnapshotStore, WeatherSource,
+    parse_open_meteo_response,
 };
 use time::macros::datetime;
 
@@ -199,4 +200,47 @@ fn fixture_weather_source_can_simulate_a_failing_fetch() {
 
     let error = source.fetch().unwrap_err();
     assert!(matches!(error, WeatherFetchError::MissingData(_)));
+}
+
+#[test]
+fn export_snapshot_is_none_before_any_successful_fetch() {
+    let store = WeatherSnapshotStore::new();
+    assert_eq!(store.export_snapshot(), None);
+}
+
+#[test]
+fn snapshot_round_trips_through_json_preserving_fresh_and_stale_age() {
+    let mut store = WeatherSnapshotStore::new();
+    let observed_at = datetime!(2026-11-24 20:00:00 UTC);
+    let reading = WeatherReading {
+        temp_c: 2.5,
+        precip_probability_pct: 40,
+        observed_at,
+    };
+    store.record_success(reading, observed_at + time::Duration::minutes(2));
+
+    let exported = store.export_snapshot().expect("snapshot must exist");
+    let json = serde_json::to_string(&exported).expect("must serialize");
+    let decoded: WeatherCacheSnapshot = serde_json::from_str(&json).expect("must deserialize");
+
+    let mut restored = WeatherSnapshotStore::new();
+    restored.restore_snapshot(decoded);
+
+    let fresh_now = observed_at + time::Duration::minutes(5);
+    assert_eq!(
+        restored.state(fresh_now),
+        WeatherPanelState::Fresh {
+            reading,
+            age: time::Duration::minutes(5),
+        }
+    );
+
+    let stale_now = observed_at + WEATHER_STALE_AFTER + time::Duration::seconds(1);
+    assert_eq!(
+        restored.state(stale_now),
+        WeatherPanelState::Stale {
+            reading,
+            age: stale_now - observed_at,
+        }
+    );
 }

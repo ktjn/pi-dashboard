@@ -90,8 +90,8 @@ struct RawRelease {
 /// "a published release includes a verifiable digest for its bundle") - so
 /// this looks them up by suffix rather than a fixed index.
 pub fn parse_github_latest_release(json: &str) -> Result<ReleaseAssets, ReleaseCheckError> {
-    let release: RawRelease =
-        serde_json::from_str(json).map_err(|error| ReleaseCheckError::InvalidJson(error.to_string()))?;
+    let release: RawRelease = serde_json::from_str(json)
+        .map_err(|error| ReleaseCheckError::InvalidJson(error.to_string()))?;
 
     let bundle_url = release
         .assets
@@ -138,8 +138,14 @@ pub enum PollEffect {
     },
 }
 
-/// Decides what a discovered release means for `state`. Pure: `now` is
-/// passed in rather than read from a clock.
+fn normalize_version(version: &str) -> &str {
+    version.strip_prefix('v').unwrap_or(version)
+}
+
+fn same_version(left: &str, right: &str) -> bool {
+    normalize_version(left) == normalize_version(right)
+}
+
 pub fn evaluate_candidate(
     state: &UpdateAgentState,
     release: ReleaseAssets,
@@ -148,11 +154,17 @@ pub fn evaluate_candidate(
     let mut next = state.clone();
     next.last_checked_at = Some(now);
 
-    if release.version == state.current_version {
+    if same_version(&release.version, &state.current_version) {
         return (next, PollEffect::NoAction);
     }
-    if state.status == UpdateAgentStatus::RolledBack
-        && state.candidate_version.as_deref() == Some(release.version.as_str())
+    let same_as_candidate = state
+        .candidate_version
+        .as_deref()
+        .is_some_and(|candidate| same_version(candidate, &release.version));
+    if matches!(
+        state.status,
+        UpdateAgentStatus::RolledBack | UpdateAgentStatus::Staged
+    ) && same_as_candidate
     {
         return (next, PollEffect::NoAction);
     }
@@ -249,7 +261,12 @@ pub fn apply_health_check_result(
         next.candidate_version = None;
         next.candidate_digest = None;
         next.status = UpdateAgentStatus::Idle;
-        (next, HealthCheckEffect::Activated { version: activated_version })
+        (
+            next,
+            HealthCheckEffect::Activated {
+                version: activated_version,
+            },
+        )
     } else {
         next.status = UpdateAgentStatus::RolledBack;
         (

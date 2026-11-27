@@ -1,4 +1,10 @@
-- system specification lives in `system-spec/`; follow `system-spec/CONSTITUTION.md` plus `system-spec/GREENFIELD.md` (this is a greenfield project with existing design documents — `pi-dashboard-spec.md`, `IMPLEMENTATION_PLAN.md`)
-- the project spec is `spec.yaml` at the repo root; it must validate before committing: `system-spec spec.yaml --stage verification` (current stage; no code exists yet, so `release` is not reachable)
+- system specification lives in `system-spec/`; follow `system-spec/CONSTITUTION.md` plus `system-spec/GREENFIELD.md` (`pi-dashboard-spec.md`, `IMPLEMENTATION_PLAN.md`)
+- the project spec is `spec.yaml` at the repo root (`--stage verification`; `release` remains gated on Pi 5 + Touch Display 2 hardware verification)
 - for a change to behavior, follow `system-spec/FEATURE.md`; for a bounded implementation slice use `system-spec spec.yaml --context <component-id>`
 - report model gaps or hidden coupling as feedback (`system-spec/CONSTITUTION.md` § Self-Improvement and Model Feedback) rather than working around them
+- local validation commands (tests, clippy, and spec validation run locally, not in GitHub Actions):
+  - `cargo test --workspace --all-targets`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo check --target wasm32-unknown-unknown -p dashboard-web`
+  - `cargo run -p dashboard-core --bin validate_board_config -- board.toml`
+  - `uv run --directory system-spec/reference-implementation python metamodel.py ../../spec.yaml --stage verification`

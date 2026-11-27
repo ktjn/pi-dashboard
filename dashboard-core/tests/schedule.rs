@@ -285,6 +285,16 @@ fn null_display_power_control_records_every_call_without_touching_hardware() {
     assert_eq!(control.calls(), &[true, true, false]);
 }
 
+#[test]
+fn logging_display_power_control_is_zero_sized_and_accepts_power_calls() {
+    use dashboard_core::schedule::LoggingDisplayPowerControl;
+
+    assert_eq!(std::mem::size_of::<LoggingDisplayPowerControl>(), 0);
+    let mut control = LoggingDisplayPowerControl::new();
+    control.set_power(true).expect("set_power must succeed");
+    control.set_power(false).expect("set_power must succeed");
+}
+
 // --- next_window_boundary ---
 
 #[test]

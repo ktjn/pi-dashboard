@@ -1,7 +1,8 @@
 use dashboard_core::board_config::{Station, TransitMode};
 use dashboard_core::departures::{
-    DepartureFetchError, DeparturesBoard, DeparturesPanelState, RawDeparture, RawDeviation,
-    parse_sl_departures_response, parse_sl_deviations_response,
+    DEVIATIONS_STALE_AFTER, DepartureFetchError, DeparturesBoard, DeparturesCacheSnapshot,
+    DeparturesPanelState, RawDeparture, RawDeviation, parse_sl_departures_response,
+    parse_sl_deviations_response,
 };
 use time::macros::datetime;
 
@@ -356,4 +357,94 @@ fn fixture_sources_are_available_behind_the_fixtures_feature() {
     // deviations rather than an error: the 120s deviation feed is
     // best-effort and must not block the 30s departure feed.
     assert_eq!(deviations_source.fetch_deviations(1).unwrap(), Vec::new());
+}
+
+#[test]
+fn undated_deviations_expire_once_their_fetch_exceeds_staleness_threshold() {
+    let departures =
+        parse_sl_departures_response(&fixture("departures_duvbo.json"), "Europe/Stockholm")
+            .expect("valid departures response must parse");
+    let fetched_at = datetime!(2026-11-24 21:42:19 UTC);
+    let undated = RawDeviation {
+        deviation_case_id: 101,
+        header: "Undated warning".to_string(),
+        importance_level: 5,
+        publish_from: None,
+        publish_upto: None,
+        affected_modes: vec![TransitMode::Metro],
+    };
+    let dated = RawDeviation {
+        deviation_case_id: 102,
+        header: "Dated warning".to_string(),
+        importance_level: 5,
+        publish_from: Some(datetime!(2026-11-24 21:00:00 UTC)),
+        publish_upto: Some(datetime!(2026-11-24 22:30:00 UTC)),
+        affected_modes: vec![TransitMode::Metro],
+    };
+
+    let mut board = DeparturesBoard::new();
+    board.record_departures_success(9324, departures, fetched_at);
+    board.record_deviations_success_at(9324, vec![undated, dated], fetched_at);
+
+    let station = duvbo(TransitMode::Metro, 10, "stockholm");
+    let at_threshold = fetched_at + DEVIATIONS_STALE_AFTER;
+    match board.station_state(&station, at_threshold) {
+        DeparturesPanelState::Stale { departures, .. } => {
+            assert_eq!(
+                departures[0].disruption.as_deref(),
+                Some("Undated warning; Dated warning")
+            );
+        }
+        other => panic!("expected Stale departures at threshold, got {other:?}"),
+    }
+
+    let past_threshold = fetched_at + DEVIATIONS_STALE_AFTER + time::Duration::seconds(1);
+    match board.station_state(&station, past_threshold) {
+        DeparturesPanelState::Stale { departures, .. } => {
+            assert_eq!(departures[0].disruption.as_deref(), Some("Dated warning"));
+        }
+        other => panic!("expected Stale departures past threshold, got {other:?}"),
+    }
+}
+
+#[test]
+fn snapshot_round_trips_through_json_preserving_departures_deviations_and_staleness() {
+    let departures =
+        parse_sl_departures_response(&fixture("departures_duvbo.json"), "Europe/Stockholm")
+            .expect("valid departures response must parse");
+    let deviations = parse_sl_deviations_response(&fixture("deviations_metro_disruption.json"))
+        .expect("valid deviations response must parse");
+    let fetched_at = datetime!(2026-11-24 21:42:19 UTC);
+
+    let mut board = DeparturesBoard::new();
+    board.record_departures_success(9324, departures, fetched_at);
+    board.record_deviations_success_at(9324, deviations, fetched_at);
+
+    let exported = board.export_snapshot();
+    let json = serde_json::to_string(&exported).expect("must serialize");
+    let decoded: DeparturesCacheSnapshot = serde_json::from_str(&json).expect("must deserialize");
+
+    let mut restored = DeparturesBoard::new();
+    restored.restore_snapshot(decoded);
+
+    let station = duvbo(TransitMode::Metro, 10, "stockholm");
+    match restored.station_state(&station, fetched_at + time::Duration::seconds(30)) {
+        DeparturesPanelState::Fresh(items) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(
+                items[0].disruption.as_deref(),
+                Some("Driftstörning på blå linjen")
+            );
+        }
+        other => panic!("expected Fresh after restore, got {other:?}"),
+    }
+
+    let stale_now = fetched_at + time::Duration::minutes(3);
+    match restored.station_state(&station, stale_now) {
+        DeparturesPanelState::Stale { departures, age } => {
+            assert_eq!(departures.len(), 1);
+            assert_eq!(age, time::Duration::minutes(3));
+        }
+        other => panic!("expected Stale after restore, got {other:?}"),
+    }
 }

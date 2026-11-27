@@ -10,15 +10,14 @@ pub struct DaylightWindow {
     pub sunrise: DateTime,
     pub sunset: DateTime,
     pub civil_dusk: DateTime,
+    pub sunrise_utc: Timestamp,
+    pub sunset_utc: Timestamp,
 }
 
 impl DaylightWindow {
-    /// Always derived from sunset - sunrise (never stored or recomputed
-    /// separately), so this structurally satisfies spec.yaml's
-    /// `daylight_duration_equals_sunset_minus_sunrise` invariant.
     pub fn daylight_duration(&self) -> Result<jiff::Span, DaylightError> {
-        self.sunset
-            .since(self.sunrise)
+        self.sunset_utc
+            .since((jiff::Unit::Hour, self.sunrise_utc))
             .map_err(|error| DaylightError::Computation(error.to_string()))
     }
 }
@@ -56,16 +55,24 @@ fn timestamp_to_julian_day(timestamp: Timestamp) -> f64 {
         + f64::from(timestamp.subsec_nanosecond()) / 86_400e9
 }
 
-fn julian_day_to_timestamp(julian_day: f64) -> Result<Timestamp, DaylightError> {
-    let total_seconds = (julian_day - 2_440_587.5) * 86_400.0;
-    let whole_seconds = total_seconds.floor();
-    let nanosecond = ((total_seconds - whole_seconds) * 1e9).round() as i32;
-    Timestamp::new(whole_seconds as i64, nanosecond)
+fn seconds_to_timestamp(total_seconds: f64) -> Result<Timestamp, DaylightError> {
+    let whole_seconds_f64 = total_seconds.floor();
+    let mut whole_seconds = whole_seconds_f64 as i64;
+    let mut nanosecond = ((total_seconds - whole_seconds_f64) * 1e9).round() as i32;
+    if nanosecond >= 1_000_000_000 {
+        whole_seconds += 1;
+        nanosecond = 0;
+    }
+    Timestamp::new(whole_seconds, nanosecond)
         .map_err(|error| DaylightError::InvalidTimestamp(error.to_string()))
 }
 
-fn local_datetime_for_event(julian_day: f64, time_zone: &str) -> Result<DateTime, DaylightError> {
-    let timestamp = julian_day_to_timestamp(julian_day)?;
+fn julian_day_to_timestamp(julian_day: f64) -> Result<Timestamp, DaylightError> {
+    let total_seconds = (julian_day - 2_440_587.5) * 86_400.0;
+    seconds_to_timestamp(total_seconds)
+}
+
+fn timestamp_in_tz(timestamp: Timestamp, time_zone: &str) -> Result<DateTime, DaylightError> {
     let zoned = timestamp
         .in_tz(time_zone)
         .map_err(|_| DaylightError::UnknownTimeZone(time_zone.to_string()))?;
@@ -193,11 +200,34 @@ pub fn daylight_window(
         "civil dusk",
     )?;
 
+    let civil_dawn_utc = julian_day_to_timestamp(civil_dawn_jd)?;
+    let sunrise_utc = julian_day_to_timestamp(sunrise_jd)?;
+    let sunset_utc = julian_day_to_timestamp(sunset_jd)?;
+    let civil_dusk_utc = julian_day_to_timestamp(civil_dusk_jd)?;
+
     Ok(DaylightWindow {
         date,
-        civil_dawn: local_datetime_for_event(civil_dawn_jd, time_zone)?,
-        sunrise: local_datetime_for_event(sunrise_jd, time_zone)?,
-        sunset: local_datetime_for_event(sunset_jd, time_zone)?,
-        civil_dusk: local_datetime_for_event(civil_dusk_jd, time_zone)?,
+        civil_dawn: timestamp_in_tz(civil_dawn_utc, time_zone)?,
+        sunrise: timestamp_in_tz(sunrise_utc, time_zone)?,
+        sunset: timestamp_in_tz(sunset_utc, time_zone)?,
+        civil_dusk: timestamp_in_tz(civil_dusk_utc, time_zone)?,
+        sunrise_utc,
+        sunset_utc,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seconds_to_timestamp_carries_nanosecond_rounding_to_next_second() {
+        let timestamp =
+            seconds_to_timestamp(1.999_999_999_9).expect("must carry nanosecond overflow");
+        assert_eq!(timestamp, Timestamp::new(2, 0).unwrap());
+
+        let negative =
+            seconds_to_timestamp(-0.000_000_000_1).expect("must carry negative overflow");
+        assert_eq!(negative, Timestamp::new(0, 0).unwrap());
+    }
 }

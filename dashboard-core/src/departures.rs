@@ -1,13 +1,12 @@
 use crate::board_config::{Station, TransitMode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-/// Resolved decision #3: departures are stale after 2 minutes (vs weather's
-/// 20 and football's 2h).
 pub const DEPARTURES_STALE_AFTER: Duration = Duration::minutes(2);
+pub const DEVIATIONS_STALE_AFTER: Duration = Duration::minutes(10);
 
 /// Mirrors `isTowardsStockholm` in the original React prototype
 /// (`sl-dashboard/src/utils.ts`): a destination/direction substring list
@@ -377,17 +376,18 @@ fn matches_direction(departure: &RawDeparture, direction: &str) -> bool {
 }
 
 fn active_disruption_text(
-    deviations: &[RawDeviation],
+    snapshot: &SiteDeviationsSnapshot,
     mode: TransitMode,
     now: OffsetDateTime,
 ) -> Option<String> {
     let mut seen = std::collections::HashSet::new();
-    let headers: Vec<&str> = deviations
+    let headers: Vec<&str> = snapshot
+        .deviations
         .iter()
         .filter(|deviation| {
             deviation.affected_modes.is_empty() || deviation.affected_modes.contains(&mode)
         })
-        .filter(|deviation| is_deviation_active(deviation, now))
+        .filter(|deviation| is_deviation_active(deviation, snapshot.fetched_at, now))
         .map(|deviation| deviation.header.as_str())
         .filter(|header| seen.insert(*header))
         .collect();
@@ -398,15 +398,21 @@ fn active_disruption_text(
     }
 }
 
-fn is_deviation_active(deviation: &RawDeviation, now: OffsetDateTime) -> bool {
+fn is_deviation_active(
+    deviation: &RawDeviation,
+    fetched_at: Option<OffsetDateTime>,
+    now: OffsetDateTime,
+) -> bool {
     if let Some(from) = deviation.publish_from
         && from > now
     {
         return false;
     }
-    if let Some(upto) = deviation.publish_upto
-        && upto < now
-    {
+    if let Some(upto) = deviation.publish_upto {
+        if upto < now {
+            return false;
+        }
+    } else if fetched_at.is_some_and(|fetched| now - fetched > DEVIATIONS_STALE_AFTER) {
         return false;
     }
     true
@@ -418,14 +424,56 @@ struct SiteDeparturesSnapshot {
     fetched_at: OffsetDateTime,
 }
 
-/// Per-distinct-site fetch cache (per the spec's "fetch once per distinct
-/// site, filter locally"): one departures snapshot and one deviations
-/// snapshot per `site_id`, independent of how many configured stations
-/// share that site under different modes/directions.
+#[derive(Debug, Clone)]
+struct SiteDeviationsSnapshot {
+    deviations: Vec<RawDeviation>,
+    fetched_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedDeparture {
+    pub destination: String,
+    pub direction: Option<String>,
+    pub transport_mode: TransitMode,
+    pub line_designation: String,
+    pub scheduled_unix: i64,
+    pub expected_unix: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedSiteDepartures {
+    pub site_id: u32,
+    pub fetched_at_unix: i64,
+    pub departures: Vec<CachedDeparture>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedDeviation {
+    pub deviation_case_id: i64,
+    pub header: String,
+    pub importance_level: i64,
+    pub publish_from_unix: Option<i64>,
+    pub publish_upto_unix: Option<i64>,
+    pub affected_modes: Vec<TransitMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedSiteDeviations {
+    pub site_id: u32,
+    pub fetched_at_unix: Option<i64>,
+    pub deviations: Vec<CachedDeviation>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeparturesCacheSnapshot {
+    pub departures: Vec<CachedSiteDepartures>,
+    pub deviations: Vec<CachedSiteDeviations>,
+}
+
 #[derive(Debug, Default)]
 pub struct DeparturesBoard {
     departures: HashMap<u32, SiteDeparturesSnapshot>,
-    deviations: HashMap<u32, Vec<RawDeviation>>,
+    deviations: HashMap<u32, SiteDeviationsSnapshot>,
 }
 
 impl DeparturesBoard {
@@ -449,16 +497,159 @@ impl DeparturesBoard {
     }
 
     pub fn record_deviations_success(&mut self, site_id: u32, deviations: Vec<RawDeviation>) {
-        self.deviations.insert(site_id, deviations);
+        self.deviations.insert(
+            site_id,
+            SiteDeviationsSnapshot {
+                deviations,
+                fetched_at: None,
+            },
+        );
     }
 
-    /// Filters by the station's mode and direction, drops elapsed
-    /// departures (actual departure time at or before `now`, regardless of
-    /// freshness), converts each remaining one to a walk-time-adjusted
-    /// countdown, and overlays any disruption active for the station's
-    /// mode right now. `Unavailable` only when this site has never been
-    /// fetched successfully; a stale fetch still shows (and filters) its
-    /// last-known departures.
+    pub fn record_deviations_success_at(
+        &mut self,
+        site_id: u32,
+        deviations: Vec<RawDeviation>,
+        fetched_at: OffsetDateTime,
+    ) {
+        self.deviations.insert(
+            site_id,
+            SiteDeviationsSnapshot {
+                deviations,
+                fetched_at: Some(fetched_at),
+            },
+        );
+    }
+
+    pub fn export_snapshot(&self) -> DeparturesCacheSnapshot {
+        let mut departures: Vec<CachedSiteDepartures> = self
+            .departures
+            .iter()
+            .map(|(&site_id, snapshot)| CachedSiteDepartures {
+                site_id,
+                fetched_at_unix: snapshot.fetched_at.unix_timestamp(),
+                departures: snapshot
+                    .departures
+                    .iter()
+                    .map(|raw| CachedDeparture {
+                        destination: raw.destination.clone(),
+                        direction: raw.direction.clone(),
+                        transport_mode: raw.transport_mode,
+                        line_designation: raw.line_designation.clone(),
+                        scheduled_unix: raw.scheduled.unix_timestamp(),
+                        expected_unix: raw.expected.map(OffsetDateTime::unix_timestamp),
+                    })
+                    .collect(),
+            })
+            .collect();
+        departures.sort_by_key(|site| site.site_id);
+
+        let mut deviations: Vec<CachedSiteDeviations> = self
+            .deviations
+            .iter()
+            .map(|(&site_id, snapshot)| CachedSiteDeviations {
+                site_id,
+                fetched_at_unix: snapshot.fetched_at.map(OffsetDateTime::unix_timestamp),
+                deviations: snapshot
+                    .deviations
+                    .iter()
+                    .map(|raw| CachedDeviation {
+                        deviation_case_id: raw.deviation_case_id,
+                        header: raw.header.clone(),
+                        importance_level: raw.importance_level,
+                        publish_from_unix: raw.publish_from.map(OffsetDateTime::unix_timestamp),
+                        publish_upto_unix: raw.publish_upto.map(OffsetDateTime::unix_timestamp),
+                        affected_modes: raw.affected_modes.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        deviations.sort_by_key(|site| site.site_id);
+
+        DeparturesCacheSnapshot {
+            departures,
+            deviations,
+        }
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: DeparturesCacheSnapshot) {
+        self.departures.clear();
+        for site in snapshot.departures {
+            let Ok(fetched_at) = OffsetDateTime::from_unix_timestamp(site.fetched_at_unix) else {
+                continue;
+            };
+            let departures: Vec<RawDeparture> = site
+                .departures
+                .into_iter()
+                .filter_map(|raw| {
+                    let scheduled = OffsetDateTime::from_unix_timestamp(raw.scheduled_unix).ok()?;
+                    let expected = raw
+                        .expected_unix
+                        .map(OffsetDateTime::from_unix_timestamp)
+                        .transpose()
+                        .ok()?;
+                    Some(RawDeparture {
+                        destination: raw.destination,
+                        direction: raw.direction,
+                        transport_mode: raw.transport_mode,
+                        line_designation: raw.line_designation,
+                        scheduled,
+                        expected,
+                    })
+                })
+                .collect();
+            self.departures.insert(
+                site.site_id,
+                SiteDeparturesSnapshot {
+                    departures,
+                    fetched_at,
+                },
+            );
+        }
+
+        self.deviations.clear();
+        for site in snapshot.deviations {
+            let Ok(fetched_at) = site
+                .fetched_at_unix
+                .map(OffsetDateTime::from_unix_timestamp)
+                .transpose()
+            else {
+                continue;
+            };
+            let deviations: Vec<RawDeviation> = site
+                .deviations
+                .into_iter()
+                .filter_map(|raw| {
+                    let publish_from = raw
+                        .publish_from_unix
+                        .map(OffsetDateTime::from_unix_timestamp)
+                        .transpose()
+                        .ok()?;
+                    let publish_upto = raw
+                        .publish_upto_unix
+                        .map(OffsetDateTime::from_unix_timestamp)
+                        .transpose()
+                        .ok()?;
+                    Some(RawDeviation {
+                        deviation_case_id: raw.deviation_case_id,
+                        header: raw.header,
+                        importance_level: raw.importance_level,
+                        publish_from,
+                        publish_upto,
+                        affected_modes: raw.affected_modes,
+                    })
+                })
+                .collect();
+            self.deviations.insert(
+                site.site_id,
+                SiteDeviationsSnapshot {
+                    deviations,
+                    fetched_at,
+                },
+            );
+        }
+    }
+
     pub fn station_state(&self, station: &Station, now: OffsetDateTime) -> DeparturesPanelState {
         let Some(snapshot) = self.departures.get(&station.site_id) else {
             return DeparturesPanelState::Unavailable;

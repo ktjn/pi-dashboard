@@ -89,7 +89,7 @@ DEFAULT_STATIONS = [
 
 ### Deployment pipeline
 
-1. **GitHub Actions (CI)**: on push/tag, validate `board.toml`, run the Rust test suite (`cargo test`), build and lint (`cargo clippy`), cross-compile an ARM64 release binary (`cross` or equivalent toolchain) targeting 64-bit Raspberry Pi OS Desktop, bundle it with assets and validated config, and publish to GitHub Releases. Stand this pipeline up once a minimal buildable skeleton exists — not against an empty repo. The GitHub Pages playground build is a separate workflow (see above).
+1. **GitHub Actions (CI)**: on PRs and tags, validate `board.toml` and build the workspace (`cargo test`, `cargo clippy`, and `spec.yaml` verification run locally). On `v*` tags, cross-compile ARM64 release binaries (`dashboard-pi`, `reconcile_power`) via `cross` targeting 64-bit Raspberry Pi OS Desktop, bundle them with `board.toml` and `deploy/systemd`, generate a `.sha256` digest, and publish to GitHub Releases. The GitHub Pages playground build is a separate workflow (see above).
 2. **Pi-side graphical session**: the installed app runs under a dedicated non-root user inside the graphical session. An independent user-level systemd timer reconciles screen power state at startup, after every deployment, and once a minute thereafter. Confirm Wayland output power control actually works against the physical panel before relying on it.
 3. **Pi-side update agent**: periodically polls GitHub Releases, verifies the downloaded bundle's digest, stages it, atomically switches the active version (e.g. symlink swap), and runs a local startup health check. During a scheduled standby window, defer activation until the next wake if the renderer can't confirm it rendered a first frame. Always keep the last known-good bundle available for rollback, and roll back automatically if the new version fails its health check.
 4. **Offline resilience**: a cold boot without network access must still show local information (clock, previously cached data where valid) and clearly mark unavailable feeds. When connectivity returns, each panel recovers independently — no full-app restart required.
@@ -99,8 +99,8 @@ DEFAULT_STATIONS = [
 1. Football: two competitions are Allsvenskan and Serie A, via two separate free-tier adapters (football-data.org for Serie A, Highlightly for Allsvenskan) rather than one paid provider. Verify Highlightly's attribution/commercial-use terms before relying on it in production.
 2. Target hardware: Raspberry Pi 5 Starter Kit + official Touch Display 2 (10.1", portrait, 1200×1920 DSI). Layout redesigned as a vertical stack for this aspect ratio (see Runtime).
 3. Display windows, coordinates and stale-data thresholds: the spec's example values (06:00–09:00 + 16:00–22:30 weekdays, 08:00–23:00 weekends; Duvbo/Stockholm coordinates; departures 2 min / weather 20 min / football 2 h staleness) are the real v1 defaults, not placeholders.
-5. Calendar auth model: service account with calendar sharing (no browser-based OAuth refresh needed on-device).
-6. Screensaver visual design: clock-only for v1; photo rotation explicitly deferred.
+4. Calendar auth model: service account with calendar sharing (no browser-based OAuth refresh needed on-device).
+5. Screensaver visual design: clock-only for v1; photo rotation explicitly deferred.
 
 ## Touch input (PI-09 to PI-13)
 
@@ -114,7 +114,7 @@ DEFAULT_STATIONS = [
 
 ## Open decisions
 
-4. Animation budget: gated on hardware testing. Before any further feature work, confirm on the real device that (a) Macroquad renders acceptably in true fullscreen under Wayland (watch for the known ~30 FPS GLFW/Wayland cap and miniquad Wayland-backend panics — fall back to XWayland or a borderless full-resolution window if hit), and (b) `wlr-randr --output DSI-1 --off/--on` actually toggles the panel from a systemd-timer context with the correct `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`. Record frame times once hardware is in hand.
+1. Animation budget: gated on hardware testing. Before any further feature work, confirm on the real device that (a) Macroquad renders acceptably in true fullscreen under Wayland (watch for the known ~30 FPS GLFW/Wayland cap and miniquad Wayland-backend panics — fall back to XWayland or a borderless full-resolution window if hit), and (b) `wlr-randr --output DSI-1 --off/--on` actually toggles the panel from a systemd-timer context with the correct `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`. Record frame times once hardware is in hand.
 
 ## Non-goals
 

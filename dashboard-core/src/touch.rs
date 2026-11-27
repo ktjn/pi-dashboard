@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
 use time::{Duration, OffsetDateTime};
+
+pub const REFETCH_RATE_LIMIT_SECONDS: u32 = 30;
 
 /// `[touch]` in `board.toml`. `enabled = false` (or the table absent, see
 /// `board_config.rs`) disables all touch handling per `req-touch-resilience`.
@@ -39,6 +42,7 @@ pub struct TouchState {
     pub football_index: Option<usize>,
     pub expanded_departure: Option<String>,
     pub last_input_at: Option<OffsetDateTime>,
+    pub last_refetch_at: BTreeMap<String, OffsetDateTime>,
 }
 
 impl TouchState {
@@ -50,6 +54,7 @@ impl TouchState {
             football_index: None,
             expanded_departure: None,
             last_input_at: None,
+            last_refetch_at: BTreeMap::new(),
         }
     }
 }
@@ -76,9 +81,16 @@ pub enum DisplayContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TouchTarget {
     Header,
-    FootballPanel { panel_count: usize },
-    DepartureRow { departure_id: String },
-    StalePanel { provider: String },
+    FootballPanel {
+        panel_count: usize,
+        current_index: usize,
+    },
+    DepartureRow {
+        departure_id: String,
+    },
+    StalePanel {
+        provider: String,
+    },
 }
 
 /// A side effect for the caller (`dashboard-pi`) to carry out. `touch.rs`
@@ -113,7 +125,11 @@ pub fn apply_touch(
     }
 }
 
-fn wake(state: &TouchState, now: OffsetDateTime, config: &TouchConfig) -> (TouchState, Vec<TouchEffect>) {
+fn wake(
+    state: &TouchState,
+    now: OffsetDateTime,
+    config: &TouchConfig,
+) -> (TouchState, Vec<TouchEffect>) {
     if state.mode == TouchMode::Wake && state.wake_until.is_some_and(|until| now < until) {
         return (state.clone(), Vec::new());
     }
@@ -123,7 +139,10 @@ fn wake(state: &TouchState, now: OffsetDateTime, config: &TouchConfig) -> (Touch
     next.last_input_at = Some(now);
     (
         next,
-        vec![TouchEffect::WakeDisplay, TouchEffect::RefreshDeparturesRequested],
+        vec![
+            TouchEffect::WakeDisplay,
+            TouchEffect::RefreshDeparturesRequested,
+        ],
     )
 }
 
@@ -133,7 +152,9 @@ fn dismiss_screensaver(
     config: &TouchConfig,
 ) -> (TouchState, Vec<TouchEffect>) {
     if state.mode == TouchMode::ScreensaverDismissed
-        && state.screensaver_dismissed_until.is_some_and(|until| now < until)
+        && state
+            .screensaver_dismissed_until
+            .is_some_and(|until| now < until)
     {
         return (state.clone(), Vec::new());
     }
@@ -152,29 +173,41 @@ fn dashboard_tap(
 ) -> (TouchState, Vec<TouchEffect>) {
     match target {
         TouchTarget::Header => (state.clone(), Vec::new()),
-        TouchTarget::FootballPanel { panel_count } => {
+        TouchTarget::FootballPanel {
+            panel_count,
+            current_index,
+        } => {
             if panel_count == 0 {
                 return (state.clone(), Vec::new());
             }
             let mut next = state.clone();
-            let current = state.football_index.unwrap_or(0);
-            next.football_index = Some((current + 1) % panel_count);
+            let base = state.football_index.unwrap_or(current_index % panel_count);
+            next.football_index = Some((base + 1) % panel_count);
             next.last_input_at = Some(now);
             (next, Vec::new())
         }
         TouchTarget::DepartureRow { departure_id } => {
             let mut next = state.clone();
-            next.expanded_departure = if state.expanded_departure.as_deref() == Some(departure_id.as_str())
-            {
-                None
-            } else {
-                Some(departure_id)
-            };
+            next.expanded_departure =
+                if state.expanded_departure.as_deref() == Some(departure_id.as_str()) {
+                    None
+                } else {
+                    Some(departure_id)
+                };
             next.last_input_at = Some(now);
             (next, Vec::new())
         }
         TouchTarget::StalePanel { provider } => {
+            let rate_limit = Duration::seconds(i64::from(REFETCH_RATE_LIMIT_SECONDS));
+            let rate_limited = state
+                .last_refetch_at
+                .get(&provider)
+                .is_some_and(|&last| now < last + rate_limit);
+            if rate_limited {
+                return (state.clone(), Vec::new());
+            }
             let mut next = state.clone();
+            next.last_refetch_at.insert(provider.clone(), now);
             next.last_input_at = Some(now);
             (next, vec![TouchEffect::RequestPanelRefetch { provider }])
         }
@@ -207,6 +240,10 @@ pub fn revert_idle(state: &TouchState, now: OffsetDateTime, config: &TouchConfig
         next.football_index = None;
         next.expanded_departure = None;
     }
+
+    let rate_limit = Duration::seconds(i64::from(REFETCH_RATE_LIMIT_SECONDS));
+    next.last_refetch_at
+        .retain(|_, last| now < *last + rate_limit);
 
     next
 }

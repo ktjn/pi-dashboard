@@ -1,0 +1,19 @@
+[Unit]
+Description=Pi Dashboard
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/pi-dashboard
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=%t
+Environment=DISPLAY_POWER_BACKEND=wlr-randr
+Environment=DISPLAY_OUTPUT=DSI-1
+EnvironmentFile=-%h/.config/pi-dashboard/env
+ExecStart=%h/pi-dashboard/dashboard-pi
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

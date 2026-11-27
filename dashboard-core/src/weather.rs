@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use time::macros::format_description;
 use time::{Duration, OffsetDateTime, PrimitiveDateTime};
@@ -71,15 +71,11 @@ impl WeatherSource for FixtureWeatherSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct WeatherSnapshot {
-    reading: WeatherReading,
-    /// When Open-Meteo's own `current.time` says the reading was observed.
-    /// Drives Fresh/Stale staleness. `fetched_at` below is only for
-    /// debugging when the HTTP call happened.
-    observed_at: OffsetDateTime,
-    #[allow(dead_code)]
-    fetched_at: OffsetDateTime,
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WeatherCacheSnapshot {
+    pub temp_c: f64,
+    pub precip_probability_pct: u8,
+    pub observed_at_unix: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -97,7 +93,7 @@ pub enum WeatherPanelState {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WeatherSnapshotStore {
-    last_successful: Option<WeatherSnapshot>,
+    last_successful: Option<WeatherReading>,
 }
 
 impl WeatherSnapshotStore {
@@ -105,20 +101,33 @@ impl WeatherSnapshotStore {
         Self::default()
     }
 
-    pub fn record_success(&mut self, reading: WeatherReading, fetched_at: OffsetDateTime) {
-        self.last_successful = Some(WeatherSnapshot {
-            observed_at: reading.observed_at,
-            reading,
-            fetched_at,
-        });
+    pub fn record_success(&mut self, reading: WeatherReading, _fetched_at: OffsetDateTime) {
+        self.last_successful = Some(reading);
+    }
+
+    pub fn export_snapshot(&self) -> Option<WeatherCacheSnapshot> {
+        self.last_successful.map(|reading| WeatherCacheSnapshot {
+            temp_c: reading.temp_c,
+            precip_probability_pct: reading.precip_probability_pct,
+            observed_at_unix: reading.observed_at.unix_timestamp(),
+        })
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: WeatherCacheSnapshot) {
+        if let Ok(observed_at) = OffsetDateTime::from_unix_timestamp(snapshot.observed_at_unix) {
+            self.last_successful = Some(WeatherReading {
+                temp_c: snapshot.temp_c,
+                precip_probability_pct: snapshot.precip_probability_pct,
+                observed_at,
+            });
+        }
     }
 
     pub fn state(&self, now: OffsetDateTime) -> WeatherPanelState {
         match self.last_successful {
             None => WeatherPanelState::Unavailable,
-            Some(snapshot) => {
-                let age = now - snapshot.observed_at;
-                let reading = snapshot.reading;
+            Some(reading) => {
+                let age = now - reading.observed_at;
                 if age <= WEATHER_STALE_AFTER {
                     WeatherPanelState::Fresh { reading, age }
                 } else {

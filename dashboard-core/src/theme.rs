@@ -57,12 +57,6 @@ pub mod palette {
         b: 0.6275,
         a: 1.0,
     };
-    pub const FRESH: Color = Color {
-        r: 0.2392,
-        g: 0.8627,
-        b: 0.5922,
-        a: 1.0,
-    };
     pub const STALE: Color = Color {
         r: 0.9412,
         g: 0.6353,
@@ -77,11 +71,6 @@ pub mod palette {
     };
 }
 
-/// Maps a panel's fresh/stale/unavailable state to its text color: neutral
-/// for normal data, amber for stale, slate for unavailable. The teal accent
-/// (`palette::FRESH`) is reserved for data itself (line numbers, points),
-/// never used as the "everything is fine" text color - that would spend the
-/// one accent on the common case instead of the exception.
 pub fn status_color(is_stale: bool, is_unavailable: bool) -> Color {
     if is_unavailable {
         palette::DOWN
@@ -92,9 +81,20 @@ pub fn status_color(is_stale: bool, is_unavailable: bool) -> Color {
     }
 }
 
-/// Bundles the two vendored fonts so render functions take one reference
-/// instead of two positional font arguments.
 pub struct Theme<'a> {
     pub mono: &'a Font,
     pub sans: &'a Font,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_color_maps_fresh_stale_and_unavailable() {
+        assert_eq!(status_color(false, false), palette::TEXT);
+        assert_eq!(status_color(true, false), palette::STALE);
+        assert_eq!(status_color(false, true), palette::DOWN);
+        assert_eq!(status_color(true, true), palette::DOWN);
+    }
 }
