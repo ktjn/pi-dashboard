@@ -3,6 +3,7 @@ pub mod clock;
 pub mod daylight;
 pub mod departures;
 pub mod render;
+pub mod scene3d;
 pub mod schedule;
 pub mod screensaver;
 pub mod standings;

@@ -8,8 +8,9 @@ use dashboard_core::departures::{
 use dashboard_core::render::{
     StationLayoutInput, compute_dashboard_layout, hit_test, render_calendar_availability_note,
     render_clock_weather_header, render_daylight_strip_at, render_departures_panel_with_header,
-    render_screensaver_view, render_standings_panel,
+    render_screensaver_view, render_standings_panel, weather_precip_probability,
 };
+use dashboard_core::scene3d::{SplitFlapBoard, compute_solar_scene};
 use dashboard_core::schedule::{
     DisplayPowerControl, DisplayState, OverrideState, active_override_power,
     is_within_display_window, reconcile, resolved_power,
@@ -1160,6 +1161,7 @@ async fn main() {
 
     let mut daylight_date: Option<Date> = None;
     let mut daylight = None;
+    let mut split_flap = SplitFlapBoard::new("00:00:00");
 
     loop {
         let now_utc = OffsetDateTime::now_utc();
@@ -1262,13 +1264,17 @@ async fn main() {
 
         match local_clock(&board_config.time_zone, now_utc) {
             Ok(clock) => {
+                split_flap.update(
+                    &format!("{:02}:{:02}:{:02}", clock.hour, clock.minute, clock.second),
+                    macroquad::time::get_frame_time(),
+                );
                 let calendar_availability = calendar_poll_state
                     .lock()
                     .expect("calendar poll state mutex poisoned")
                     .availability(now_utc);
 
                 if showing_screensaver {
-                    render_screensaver_view(&clock, &calendar_availability, &theme);
+                    render_screensaver_view(&split_flap, &calendar_availability, &theme);
                     macroquad::window::next_frame().await;
                     continue;
                 }
@@ -1373,7 +1379,7 @@ async fn main() {
                     }
                 }
 
-                render_clock_weather_header(&clock, &weather_state, &theme);
+                render_clock_weather_header(&clock, &split_flap, &weather_state, &theme);
 
                 for ((station, state), &panel_top) in board_config
                     .stations
@@ -1405,7 +1411,15 @@ async fn main() {
                             daylight_date = Some(today);
                         }
                         if let Some(window) = &daylight {
-                            let _ = render_daylight_strip_at(window, layout.daylight_top, &theme);
+                            let solar_scene =
+                                compute_solar_scene(window, now_utc, &board_config.time_zone);
+                            let _ = render_daylight_strip_at(
+                                window,
+                                &solar_scene,
+                                weather_precip_probability(&weather_state),
+                                layout.daylight_top,
+                                &theme,
+                            );
                         }
                     }
                     Err(error) => eprintln!("local date computation failed: {error}"),

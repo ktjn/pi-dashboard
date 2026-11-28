@@ -24,13 +24,14 @@ Wall-mounted dashboard, read from across a room, answering: when should I leave,
 
 ## Runtime
 
-- Single fullscreen Rust application. This is a hard requirement, not a suggestion — no Electron/Node/Python runtime on the device.
-- Prototype with Macroquad on the target Pi and LCD before committing to it; a fixture replay on the physical screen should confirm legibility, frame times, and whether any 3D/transition effect earns its space.
-- Target panel: official Raspberry Pi Touch Display 2 (10.1", 1200×1920 DSI, natively portrait) on a Raspberry Pi 5. Layout is a vertical stack, not a wide-screen grid: clock and weather header, departures as the large middle block, daylight as a thin strip, football in a rotating panel at the bottom. Screensaver (PI-07) fully replaces this layout while active.
-- Split-flap transition on changed digits as the starting animation treatment.
+- Single fullscreen Rust application rendered with Macroquad — no Electron/Node/Python runtime on the device.
+- Default 3D presentation:
+  - Lit 3D extruded split-flap clock in the header and screensaver.
+  - 3D solar & weather archipelago diorama in the daylight strip.
+- Target panel: official Raspberry Pi Touch Display 2 (10.1", 1200×1920 DSI, natively portrait) on a Raspberry Pi 5. Layout is a vertical stack: clock and weather header, departures as the large middle block, daylight strip with 3D diorama, football in a rotating panel at the bottom. Screensaver (PI-07) fully replaces this layout while active.
 - Fetch data outside the render loop. Keep a timestamped snapshot per provider and per station/league so one failing request only affects its panel. Distinguish a successful-empty result from an unavailable feed. Remove elapsed departures, mark stale values, show an unavailable state when no usable data exists. Compute clock, countdowns and daylight locally, never from a remote clock.
 - Screen power control uses `wlr-randr --output DSI-1 --off/--on` (not `vcgencmd display_power`, which is non-functional on Pi 5 + Wayland/labwc). Any process invoking it (the systemd timer, or indirectly PI-08) must run with the correct `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` for the active graphical session, or the call fails silently.
-- Gate before further feature work: on real hardware, confirm Macroquad renders acceptably in true fullscreen under Wayland. Known risk: GLFW/Wayland fullscreen can cap at ~30 FPS, and certain miniquad Wayland-backend configs panic on startup. Fall back to XWayland or a borderless full-resolution window if hit.
+- Hardware verification gate on Pi 5 + Touch Display 2: confirm Macroquad sustains ~50 FPS in true fullscreen under Wayland with the 3D scenes enabled. Known risk: GLFW/Wayland fullscreen can cap at ~30 FPS, and certain miniquad Wayland-backend configs panic on startup. Fall back to XWayland or a borderless full-resolution window if hit.
 
 ## Data sources
 

@@ -1,6 +1,9 @@
 use crate::clock::LocalClock;
 use crate::daylight::DaylightWindow;
 use crate::departures::{Departure, DeparturesPanelState};
+use crate::scene3d::{
+    SolarSceneState, SplitFlapBoard, render_solar_diorama_3d, render_split_flap_clock_3d,
+};
 use crate::screensaver::CalendarAvailability;
 use crate::standings::StandingsPanelState;
 use crate::theme::{Theme, palette, status_color};
@@ -8,10 +11,10 @@ use crate::touch::TouchTarget;
 use crate::weather::WeatherPanelState;
 
 pub const MIN_TOUCH_TARGET_PX: f32 = 48.0;
-pub const HEADER_HEIGHT: f32 = 80.0;
-pub const WEATHER_HEADER_X: f32 = 240.0;
+pub const HEADER_HEIGHT: f32 = 96.0;
+pub const WEATHER_HEADER_X: f32 = 332.0;
 pub const DEPARTURE_ROW_HEIGHT: f32 = 48.0;
-pub const DAYLIGHT_STRIP_HEIGHT: f32 = 48.0;
+pub const DAYLIGHT_STRIP_HEIGHT: f32 = 220.0;
 
 const MAX_INLINE_DISRUPTION_CHARS: usize = 40;
 const STATION_HEADER_HEIGHT: f32 = MIN_TOUCH_TARGET_PX;
@@ -56,17 +59,24 @@ pub fn format_clock_weather_header(
     }
 }
 
+pub fn weather_precip_probability(state: &WeatherPanelState) -> u8 {
+    match state {
+        WeatherPanelState::Fresh { reading, .. } | WeatherPanelState::Stale { reading, .. } => {
+            reading.precip_probability_pct
+        }
+        WeatherPanelState::Unavailable => 0,
+    }
+}
+
 pub fn render_clock_weather_header(
     clock: &LocalClock,
+    split_flap: &SplitFlapBoard,
     weather_state: &WeatherPanelState,
     theme: &Theme,
 ) {
     use macroquad::shapes::{draw_line, draw_rectangle};
-    use macroquad::text::{TextParams, draw_text_ex, measure_text};
+    use macroquad::text::{TextParams, draw_text_ex};
     use macroquad::window::screen_width;
-
-    const TIME_FONT_SIZE: u16 = 40;
-    const WEATHER_GAP: f32 = 32.0;
 
     let display = format_clock_weather_header(clock, weather_state);
 
@@ -80,19 +90,7 @@ pub fn render_clock_weather_header(
         palette::RULE,
     );
 
-    draw_text_ex(
-        &display.time_text,
-        20.0,
-        52.0,
-        TextParams {
-            font: Some(theme.mono),
-            font_size: TIME_FONT_SIZE,
-            color: palette::TEXT,
-            ..Default::default()
-        },
-    );
-
-    let time_width = measure_text(&display.time_text, Some(theme.mono), TIME_FONT_SIZE, 1.0).width;
+    render_split_flap_clock_3d(split_flap, 16.0, 8.0, 300.0, 80.0);
 
     let weather_color = status_color(
         matches!(weather_state, WeatherPanelState::Stale { .. }),
@@ -100,8 +98,8 @@ pub fn render_clock_weather_header(
     );
     draw_text_ex(
         &display.weather_text,
-        (20.0 + time_width + WEATHER_GAP).max(WEATHER_HEADER_X),
-        52.0,
+        WEATHER_HEADER_X,
+        60.0,
         TextParams {
             font: Some(theme.sans),
             font_size: 32,
@@ -139,7 +137,13 @@ pub fn format_daylight_strip(window: &DaylightWindow) -> DaylightStripDisplay {
     }
 }
 
-pub fn render_daylight_strip_at(window: &DaylightWindow, top: f32, theme: &Theme) -> f32 {
+pub fn render_daylight_strip_at(
+    window: &DaylightWindow,
+    solar_scene: &SolarSceneState,
+    precip_probability_pct: u8,
+    top: f32,
+    theme: &Theme,
+) -> f32 {
     use macroquad::shapes::{draw_line, draw_rectangle};
     use macroquad::text::{TextParams, draw_text_ex};
     use macroquad::window::screen_width;
@@ -155,7 +159,17 @@ pub fn render_daylight_strip_at(window: &DaylightWindow, top: f32, theme: &Theme
         palette::PANEL,
     );
     draw_line(0.0, top, screen_width(), top, 1.0, palette::RULE);
-    draw_line(0.0, bottom, screen_width(), bottom, 1.0, palette::RULE);
+
+    render_solar_diorama_3d(
+        solar_scene,
+        precip_probability_pct,
+        macroquad::time::get_time() as f32,
+        20.0,
+        top + 6.0,
+        (screen_width() - 40.0).max(1.0),
+        174.0,
+    );
+
     let text = format!(
         "Dawn {}  Sunrise {}  Sunset {}  Dusk {}  ({})",
         display.civil_dawn_text,
@@ -167,7 +181,7 @@ pub fn render_daylight_strip_at(window: &DaylightWindow, top: f32, theme: &Theme
     draw_text_ex(
         &text,
         20.0,
-        top + 31.0,
+        top + 202.0,
         TextParams {
             font: Some(theme.mono),
             font_size: 22,
@@ -175,6 +189,7 @@ pub fn render_daylight_strip_at(window: &DaylightWindow, top: f32, theme: &Theme
             ..Default::default()
         },
     );
+    draw_line(0.0, bottom, screen_width(), bottom, 1.0, palette::RULE);
     bottom
 }
 
@@ -750,35 +765,31 @@ fn centered_text_x(screen_width: f32, text_width: f32) -> f32 {
     ((screen_width - text_width) / 2.0).max(20.0)
 }
 
+fn screensaver_clock_rect(screen_width: f32, screen_height: f32) -> (f32, f32, f32, f32) {
+    let width = (screen_width * 0.80).clamp(320.0, 680.0);
+    let height = 190.0;
+    let x = centered_text_x(screen_width, width);
+    let y = ((screen_height - height) / 2.0).max(20.0);
+    (x, y, width, height)
+}
+
 pub fn render_screensaver_view(
-    clock: &LocalClock,
+    split_flap: &SplitFlapBoard,
     availability: &CalendarAvailability,
     theme: &Theme,
 ) {
     use macroquad::shapes::draw_rectangle;
-    use macroquad::text::{TextParams, draw_text_ex, measure_text};
     use macroquad::window::{screen_height, screen_width};
 
-    let display = format_screensaver_view(clock, availability);
+    let screen_w = screen_width();
+    let screen_h = screen_height();
 
-    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), palette::INK);
+    draw_rectangle(0.0, 0.0, screen_w, screen_h, palette::INK);
 
-    let metrics = measure_text(&display.time_text, Some(theme.mono), 80, 1.0);
-    let center_x = centered_text_x(screen_width(), metrics.width);
-    let center_y = screen_height() / 2.0;
-    draw_text_ex(
-        &display.time_text,
-        center_x,
-        center_y,
-        TextParams {
-            font: Some(theme.mono),
-            font_size: 80,
-            color: palette::TEXT,
-            ..Default::default()
-        },
-    );
+    let (x, y, width, height) = screensaver_clock_rect(screen_w, screen_h);
+    render_split_flap_clock_3d(split_flap, x, y, width, height);
 
-    render_calendar_availability_note(availability, screen_height() - 20.0, theme);
+    render_calendar_availability_note(availability, screen_h - 20.0, theme);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1653,7 +1664,34 @@ mod tests {
     }
 
     #[test]
-    fn hit_test_maps_stale_weather_text_region_at_260px_and_header_when_fresh() {
+    fn weather_precip_probability_extracts_reading_or_defaults_to_zero() {
+        let fresh = WeatherPanelState::Fresh {
+            reading: WeatherReading {
+                temp_c: 3.4,
+                precip_probability_pct: 45,
+                observed_at: datetime!(2026-11-24 20:00:00 UTC),
+            },
+            age: Duration::minutes(2),
+        };
+        let stale = WeatherPanelState::Stale {
+            reading: WeatherReading {
+                temp_c: -1.0,
+                precip_probability_pct: 70,
+                observed_at: datetime!(2026-11-24 20:00:00 UTC),
+            },
+            age: Duration::minutes(45),
+        };
+
+        assert_eq!(weather_precip_probability(&fresh), 45);
+        assert_eq!(weather_precip_probability(&stale), 70);
+        assert_eq!(
+            weather_precip_probability(&WeatherPanelState::Unavailable),
+            0
+        );
+    }
+
+    #[test]
+    fn hit_test_maps_stale_weather_text_region_at_360px_and_header_when_fresh() {
         use crate::touch::TouchTarget;
 
         let (duvbo, sundbyberg) = sample_station_states();
@@ -1668,23 +1706,36 @@ mod tests {
             },
         ];
 
+        assert_eq!(HEADER_HEIGHT, 96.0);
+        assert_eq!(WEATHER_HEADER_X, 332.0);
+
         let stale_layout =
             compute_dashboard_layout(1200.0, true, &stations, None, false, 2, 0, "serie-a");
         assert_eq!(
-            hit_test(&stale_layout, 260.0, 40.0),
+            hit_test(&stale_layout, 360.0, 48.0),
             Some(TouchTarget::StalePanel {
                 provider: "weather".to_string(),
             })
         );
         assert_eq!(
-            hit_test(&stale_layout, 100.0, 40.0),
+            hit_test(&stale_layout, 360.0, 88.0),
+            Some(TouchTarget::StalePanel {
+                provider: "weather".to_string(),
+            })
+        );
+        assert_eq!(
+            hit_test(&stale_layout, 300.0, 48.0),
+            Some(TouchTarget::Header)
+        );
+        assert_eq!(
+            hit_test(&stale_layout, 100.0, 48.0),
             Some(TouchTarget::Header)
         );
 
         let fresh_layout =
             compute_dashboard_layout(1200.0, false, &stations, None, false, 2, 0, "serie-a");
         assert_eq!(
-            hit_test(&fresh_layout, 260.0, 40.0),
+            hit_test(&fresh_layout, 360.0, 48.0),
             Some(TouchTarget::Header)
         );
     }
@@ -1812,6 +1863,45 @@ mod tests {
         assert_eq!(
             layout.standings_top,
             layout.daylight_top + DAYLIGHT_STRIP_HEIGHT
+        );
+    }
+
+    #[test]
+    fn daylight_strip_height_reserves_220px_for_solar_diorama_and_text_without_hit_target() {
+        let (duvbo, sundbyberg) = sample_station_states();
+        let stations = [
+            StationLayoutInput {
+                site_id: 9324,
+                state: &duvbo,
+            },
+            StationLayoutInput {
+                site_id: 9325,
+                state: &sundbyberg,
+            },
+        ];
+
+        assert_eq!(DAYLIGHT_STRIP_HEIGHT, 220.0);
+
+        let layout =
+            compute_dashboard_layout(1200.0, false, &stations, None, false, 2, 0, "allsvenskan");
+        assert_eq!(layout.standings_top - layout.daylight_top, 220.0);
+        assert_eq!(hit_test(&layout, 100.0, layout.daylight_top + 180.0), None);
+    }
+
+    #[test]
+    fn screensaver_clock_rect_centers_and_clamps_width_for_split_flap_3d() {
+        assert_eq!(
+            screensaver_clock_rect(1200.0, 1920.0),
+            (260.0, 865.0, 680.0, 190.0)
+        );
+        let (x, y, width, height) = screensaver_clock_rect(600.0, 800.0);
+        assert!((x - 60.0).abs() < 1e-3);
+        assert_eq!(y, 305.0);
+        assert!((width - 480.0).abs() < 1e-3);
+        assert_eq!(height, 190.0);
+        assert_eq!(
+            screensaver_clock_rect(320.0, 480.0),
+            (20.0, 145.0, 320.0, 190.0)
         );
     }
 }

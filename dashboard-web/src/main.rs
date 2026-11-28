@@ -8,8 +8,9 @@ use dashboard_core::departures::{
 use dashboard_core::render::{
     StationLayoutInput, compute_dashboard_layout, hit_test, render_calendar_availability_note,
     render_clock_weather_header, render_daylight_strip_at, render_departures_panel_with_header,
-    render_screensaver_view, render_standings_panel,
+    render_screensaver_view, render_standings_panel, weather_precip_probability,
 };
+use dashboard_core::scene3d::{SplitFlapBoard, compute_solar_scene};
 use dashboard_core::schedule::{DisplayState, reconcile};
 use dashboard_core::screensaver::{
     CalendarEvent, CalendarPollState, FixtureCalendarSource, poll_calendar,
@@ -50,11 +51,11 @@ const PLAYGROUND_DEPARTURES_REFRESH_INTERVAL: Duration = Duration::seconds(30);
 const PLAYGROUND_WEATHER_REFRESH_INTERVAL: Duration = Duration::minutes(10);
 const PLAYGROUND_STANDINGS_REFRESH_INTERVAL: Duration = Duration::minutes(5);
 
-const DEMO_UNAVAILABLE_UNTIL: Duration = Duration::seconds(10);
 const DEMO_SCREENSAVER_FROM: Duration = Duration::seconds(60);
 const DEMO_SCREENSAVER_UNTIL: Duration = Duration::seconds(180);
 const DEMO_STALE_FROM: Duration = Duration::seconds(200);
 const DEMO_STALE_UNTIL: Duration = Duration::seconds(215);
+const DEMO_UNAVAILABLE_FROM: Duration = Duration::seconds(225);
 const DEMO_CYCLE_LENGTH: Duration = Duration::seconds(240);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +66,7 @@ enum DemoPhase {
 }
 
 fn demo_phase(elapsed_since_start: Duration) -> DemoPhase {
-    if elapsed_since_start < DEMO_UNAVAILABLE_UNTIL {
+    if elapsed_since_start >= DEMO_UNAVAILABLE_FROM {
         DemoPhase::Unavailable
     } else if elapsed_since_start >= DEMO_STALE_FROM && elapsed_since_start < DEMO_STALE_UNTIL {
         DemoPhase::Stale
@@ -162,7 +163,7 @@ fn refresh_fixture_weather(
 ) {
     let mut weather_source = FixtureWeatherSource::new(vec![Ok(WeatherReading {
         temp_c: 3.5,
-        precip_probability_pct: 20,
+        precip_probability_pct: 45,
         observed_at,
     })]);
     if let Ok(reading) = weather_source.fetch() {
@@ -317,7 +318,7 @@ async fn main() {
         sans: &sans_font,
     };
 
-    let base_utc = datetime!(2026-11-24 20:00:00 UTC);
+    let base_utc = datetime!(2026-06-21 10:30:00 UTC);
     let start_time = macroquad::time::get_time();
 
     let mut weather_store = WeatherSnapshotStore::new();
@@ -374,6 +375,7 @@ async fn main() {
 
     let mut daylight_date: Option<Date> = None;
     let mut daylight = None;
+    let mut split_flap = SplitFlapBoard::new("00:00:00");
 
     let cycle_length_seconds = DEMO_CYCLE_LENGTH.whole_seconds();
 
@@ -453,6 +455,10 @@ async fn main() {
         macroquad::window::clear_background(palette::INK);
 
         let clock = local_clock(STOCKHOLM_TZ, now_utc).expect("time zone must resolve");
+        split_flap.update(
+            &format!("{:02}:{:02}:{:02}", clock.hour, clock.minute, clock.second),
+            macroquad::time::get_frame_time(),
+        );
         let calendar_availability = calendar_poll_state.availability(now_utc);
 
         let display_state = reconcile(true, None, calendar_poll_state.screensaver_active());
@@ -471,7 +477,7 @@ async fn main() {
                 taps.clear();
             }
             if touch_state.mode != TouchMode::ScreensaverDismissed {
-                render_screensaver_view(&clock, &calendar_availability, &theme);
+                render_screensaver_view(&split_flap, &calendar_availability, &theme);
                 macroquad::window::next_frame().await;
                 continue;
             }
@@ -575,7 +581,7 @@ async fn main() {
             );
         }
 
-        render_clock_weather_header(&clock, &weather_state, &theme);
+        render_clock_weather_header(&clock, &split_flap, &weather_state, &theme);
 
         for ((station, state), top) in stations
             .iter()
@@ -599,7 +605,14 @@ async fn main() {
             daylight_date = Some(today);
         }
         if let Some(window) = &daylight {
-            let _ = render_daylight_strip_at(window, layout.daylight_top, &theme);
+            let solar_scene = compute_solar_scene(window, now_utc, STOCKHOLM_TZ);
+            let _ = render_daylight_strip_at(
+                window,
+                &solar_scene,
+                weather_precip_probability(&weather_state),
+                layout.daylight_top,
+                &theme,
+            );
         }
 
         render_standings_panel(
@@ -625,14 +638,15 @@ mod tests {
 
     #[test]
     fn demo_phase_transitions_at_expected_boundaries() {
-        assert_eq!(demo_phase(Duration::seconds(0)), DemoPhase::Unavailable);
-        assert_eq!(demo_phase(Duration::seconds(9)), DemoPhase::Unavailable);
+        assert_eq!(demo_phase(Duration::seconds(0)), DemoPhase::Fresh);
         assert_eq!(demo_phase(Duration::seconds(10)), DemoPhase::Fresh);
         assert_eq!(demo_phase(Duration::seconds(199)), DemoPhase::Fresh);
         assert_eq!(demo_phase(Duration::seconds(200)), DemoPhase::Stale);
         assert_eq!(demo_phase(Duration::seconds(214)), DemoPhase::Stale);
         assert_eq!(demo_phase(Duration::seconds(215)), DemoPhase::Fresh);
-        assert_eq!(demo_phase(Duration::seconds(239)), DemoPhase::Fresh);
+        assert_eq!(demo_phase(Duration::seconds(224)), DemoPhase::Fresh);
+        assert_eq!(demo_phase(Duration::seconds(225)), DemoPhase::Unavailable);
+        assert_eq!(demo_phase(Duration::seconds(239)), DemoPhase::Unavailable);
     }
 
     #[test]
@@ -675,9 +689,9 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].start, cycle_start + DEMO_SCREENSAVER_FROM);
         assert_eq!(events[0].end, cycle_start + DEMO_SCREENSAVER_UNTIL);
-        assert!(DEMO_UNAVAILABLE_UNTIL < DEMO_SCREENSAVER_FROM);
         assert!(DEMO_SCREENSAVER_UNTIL < DEMO_STALE_FROM);
-        assert!(DEMO_STALE_UNTIL < DEMO_CYCLE_LENGTH);
+        assert!(DEMO_STALE_UNTIL < DEMO_UNAVAILABLE_FROM);
+        assert!(DEMO_UNAVAILABLE_FROM < DEMO_CYCLE_LENGTH);
 
         let rules = fixture_screensaver_rules();
         let mut poll_state = CalendarPollState::new();

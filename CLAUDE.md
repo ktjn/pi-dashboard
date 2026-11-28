@@ -2,9 +2,11 @@
 - the project spec is `spec.yaml` at the repo root (`--stage verification`; `release` remains gated on Pi 5 + Touch Display 2 hardware verification)
 - for a change to behavior, follow `system-spec/FEATURE.md`; for a bounded implementation slice use `system-spec spec.yaml --context <component-id>`
 - report model gaps or hidden coupling as feedback (`system-spec/CONSTITUTION.md` § Self-Improvement and Model Feedback) rather than working around them
+- local preview: `uv run scripts/preview.py` (default native release; `--mode web` for browser playground)
 - local validation commands (tests, clippy, and spec validation run locally, not in GitHub Actions):
   - `cargo test --workspace --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo check --target wasm32-unknown-unknown -p dashboard-web`
   - `cargo run -p dashboard-core --bin validate_board_config -- board.toml`
+  - `uv run python -m unittest discover -s scripts -p "test_*.py"`
   - `uv run --directory system-spec/reference-implementation python metamodel.py ../../spec.yaml --stage verification`

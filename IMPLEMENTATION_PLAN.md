@@ -4,6 +4,8 @@ Reference: `pi-dashboard-spec.md`. Requirements PI-01..13, Runtime, Resolved dec
 
 ## Current status
 - Phases 1–7 software implementation (`dashboard-core`, `dashboard-pi`, `reconcile_power`, `dashboard-web`, systemd units, CI/Pages workflows) is complete and verified locally.
+- Default Macroquad presentation includes the lit 3D extruded split-flap clock (header + screensaver) and the 3D solar & weather archipelago diorama (daylight strip).
+- Local preview runner: `uv run scripts/preview.py` (defaults to native release; `--mode web` for the WebGL playground).
 - Phase 0 hardware checks (Macroquad Wayland frame rate, `wlr-randr` from systemd user timer, blanked-panel touch input, on-device first-frame update health check) remain pending Pi 5 + Touch Display 2 hardware verification.
 
 ## Non-goals (carried from spec)
@@ -27,7 +29,7 @@ Validation: manual observation on device; record FPS and the working invocation 
 Depends on: Phase 0 passing (or at least the working macroquad invocation known).
 
 1. `cargo new` workspace with crates:
-   - `dashboard-core` (rendering, panel layout, split-flap animation, state machine for normal/standby/override/screensaver) — compiles to both native (ARM64 target for Pi) and `wasm32-unknown-unknown` (for the GitHub Pages playground).
+   - `dashboard-core` (rendering, panel layout, 3D split-flap clock, 3D solar & weather diorama, state machine for normal/standby/override/screensaver) — compiles to both native (ARM64 target for Pi) and `wasm32-unknown-unknown` (for the GitHub Pages playground).
    - `dashboard-pi` (binary): native entry point, wires real data providers, embedded HTTP server (PI-08), systemd-timer-facing override file.
    - `dashboard-web` (binary/wasm target): entry point using fixture data instead of real providers, no HTTP server, no control panel.
 2. `board.toml` schema + parser: stations, walk times, coordinates, time zone, competitions, display windows, screensaver rules. Validate on load; reject on startup with a clear error (PI-06 CI will also validate it).
@@ -43,7 +45,7 @@ Each sub-step: write the provider/fetch logic with tests against recorded fixtur
 3. **PI-01** Departures — SL Transport API client, per-site fetch/filter, walking-time countdown, disruption overlay (120s poll), elapsed-departure removal, stale/unavailable states.
 4. **PI-04** Football — two adapters (football-data.org for Serie A, Highlightly for Allsvenskan) behind one trait/interface so panel rendering doesn't care which provider backs a competition; hourly refresh, last-good-table cache per competition/season.
 
-Exit criteria per step: unit tests pass against fixture data; manual render check in the `dashboard-web` playground (even before GitHub Pages is wired, run it locally via `cargo run --target wasm32-unknown-unknown` + a static file server, or `trunk serve`) confirms the panel reads correctly in the portrait vertical-stack layout.
+Exit criteria per step: unit tests pass against fixture data; manual render check via `uv run scripts/preview.py` (native release by default; `--mode web` for the WebGL playground) confirms the panel reads correctly in the portrait vertical-stack layout.
 
 ## Phase 3 — Schedule, standby, and the state machine
 Depends on: Phase 2 (panels exist to show/hide), Phase 0 (`wlr-randr` invocation confirmed).
