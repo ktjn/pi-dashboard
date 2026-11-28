@@ -6,3 +6,5 @@ staged-version.txt
 touch-wake-until.txt
 dashboard-cache.json
 staging/
+__pycache__/
+*.pyc
