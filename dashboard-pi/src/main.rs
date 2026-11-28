@@ -6,11 +6,12 @@ use dashboard_core::departures::{
     RawDeparture, RawDeviation, parse_sl_departures_response, parse_sl_deviations_response,
 };
 use dashboard_core::render::{
-    StationLayoutInput, compute_dashboard_layout, hit_test, render_calendar_availability_note,
-    render_clock_weather_header, render_daylight_strip_at, render_departures_panel_with_header,
-    render_screensaver_view, render_standings_panel, weather_precip_probability,
+    StandingsRenderContext, StationHeaderMeta, StationLayoutInput, compute_dashboard_layout,
+    hit_test, render_calendar_availability_note, render_clock_weather_header,
+    render_daylight_strip_at, render_departures_panel_rich, render_screensaver_view_rich,
+    render_standings_panel_rich, weather_precip_probability,
 };
-use dashboard_core::scene3d::{SplitFlapBoard, compute_solar_scene};
+use dashboard_core::scene3d::{PanelFlipTransition, SplitFlapBoard, compute_solar_scene};
 use dashboard_core::schedule::{
     DisplayPowerControl, DisplayState, OverrideState, active_override_power,
     is_within_display_window, reconcile, resolved_power,
@@ -1110,17 +1111,18 @@ async fn main() {
         board_config.display_windows.clone(),
     );
 
+    let rotation_interval_seconds = board_config
+        .panel_rotation
+        .as_ref()
+        .map(|rotation| rotation.interval_seconds)
+        .unwrap_or(STANDINGS_ROTATION_DEFAULT_INTERVAL_SECONDS);
     let standings_rotation = StandingsRotation::new(
         board_config
             .competitions
             .iter()
             .map(|competition| competition.id.clone())
             .collect(),
-        board_config
-            .panel_rotation
-            .as_ref()
-            .map(|rotation| rotation.interval_seconds)
-            .unwrap_or(STANDINGS_ROTATION_DEFAULT_INTERVAL_SECONDS),
+        rotation_interval_seconds,
     );
 
     match parse_remote_control_token(std::env::var(REMOTE_CONTROL_TOKEN_ENV_VAR).ok()) {
@@ -1162,6 +1164,12 @@ async fn main() {
     let mut daylight_date: Option<Date> = None;
     let mut daylight = None;
     let mut split_flap = SplitFlapBoard::new("00:00:00");
+    let initial_competition_id = board_config
+        .competitions
+        .first()
+        .map(|competition| competition.id.as_str())
+        .unwrap_or("");
+    let mut standings_flip = PanelFlipTransition::new(initial_competition_id);
 
     loop {
         let now_utc = OffsetDateTime::now_utc();
@@ -1264,9 +1272,10 @@ async fn main() {
 
         match local_clock(&board_config.time_zone, now_utc) {
             Ok(clock) => {
+                let frame_dt = macroquad::time::get_frame_time();
                 split_flap.update(
                     &format!("{:02}:{:02}:{:02}", clock.hour, clock.minute, clock.second),
-                    macroquad::time::get_frame_time(),
+                    frame_dt,
                 );
                 let calendar_availability = calendar_poll_state
                     .lock()
@@ -1274,7 +1283,12 @@ async fn main() {
                     .availability(now_utc);
 
                 if showing_screensaver {
-                    render_screensaver_view(&split_flap, &calendar_availability, &theme);
+                    render_screensaver_view_rich(
+                        &clock,
+                        &split_flap,
+                        &calendar_availability,
+                        &theme,
+                    );
                     macroquad::window::next_frame().await;
                     continue;
                 }
@@ -1379,6 +1393,8 @@ async fn main() {
                     }
                 }
 
+                standings_flip.update(active_competition_id, frame_dt);
+
                 render_clock_weather_header(&clock, &split_flap, &weather_state, &theme);
 
                 for ((station, state), &panel_top) in board_config
@@ -1387,9 +1403,13 @@ async fn main() {
                     .zip(station_states.iter())
                     .zip(layout.station_tops.iter())
                 {
-                    render_departures_panel_with_header(
-                        &station.name,
-                        station.site_id,
+                    render_departures_panel_rich(
+                        StationHeaderMeta {
+                            name: &station.name,
+                            site_id: station.site_id,
+                            mode: station.mode,
+                            walk_time_min: station.walk_time_min,
+                        },
                         state,
                         panel_top,
                         current_touch.expanded_departure.as_deref(),
@@ -1425,8 +1445,16 @@ async fn main() {
                     Err(error) => eprintln!("local date computation failed: {error}"),
                 }
 
-                render_standings_panel(
-                    active_competition_id,
+                let rotation_progress = standings_rotation.rotation_progress(now_utc);
+                render_standings_panel_rich(
+                    StandingsRenderContext {
+                        competition_label: active_competition_id,
+                        panel_count: board_config.competitions.len(),
+                        active_index,
+                        is_paused: current_touch.football_index.is_some(),
+                        rotation_progress,
+                        flip: Some(&standings_flip),
+                    },
                     &standings_state,
                     layout.standings_top,
                     &theme,

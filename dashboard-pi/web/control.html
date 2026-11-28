@@ -5,46 +5,667 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pi-dashboard control</title>
 <style>
-  body { font: 16px system-ui, sans-serif; background: #0b1020; color: #e8ecf8; max-width: 28rem; margin: 2rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.25rem; }
-  button { font: inherit; padding: 0.6rem 1rem; margin: 0.25rem 0.25rem 0.25rem 0; border: 1px solid #3a4266; border-radius: 0.4rem; background: #151b33; color: inherit; cursor: pointer; }
-  button:hover { background: #1f2748; }
-  input { font: inherit; padding: 0.5rem; width: 100%; box-sizing: border-box; border: 1px solid #3a4266; border-radius: 0.4rem; background: #151b33; color: inherit; }
-  dl { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 1rem; }
-  dt { opacity: 0.7; }
-  #error { color: #ff6b6b; }
-  #token-form, #panel { display: none; }
+  :root {
+    --ink: #0e1420;
+    --panel: #131b2a;
+    --card: #182131;
+    --card-hover: #1f2b3f;
+    --rule: #2a3647;
+    --text: #e7ecf2;
+    --muted: #8b9bb4;
+    --ok: #34d399;
+    --stale: #f0a23d;
+    --alert: #f87171;
+    --accent: #38bdf8;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+    --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--ink);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.45;
+    padding: 1.5rem 1rem 2.5rem;
+  }
+
+  .shell {
+    max-width: 34rem;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-bottom: 0.85rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .brand {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .eyebrow {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    color: var(--text);
+  }
+
+  .version-badge {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--muted);
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    padding: 0.28rem 0.7rem;
+    white-space: nowrap;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 0.65rem;
+    padding: 1.1rem 1.2rem;
+  }
+
+  #token-form,
+  #panel {
+    display: none;
+  }
+
+  .token-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+  }
+
+  .token-card label {
+    font-size: 0.85rem;
+    color: var(--muted);
+    display: block;
+  }
+
+  .token-row {
+    display: flex;
+    gap: 0.6rem;
+  }
+
+  input[type="password"] {
+    flex: 1;
+    min-height: 44px;
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid var(--rule);
+    border-radius: 0.45rem;
+    background: var(--ink);
+    color: var(--text);
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+
+  input[type="password"]:focus {
+    border-color: var(--accent);
+  }
+
+  .hero-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.95rem;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .hero-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .state-display {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .pulse-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--dot-color, var(--muted));
+    box-shadow: 0 0 0 0 var(--dot-color, var(--muted));
+    animation: pulse-ring 2.2s ease-out infinite;
+  }
+
+  @keyframes pulse-ring {
+    0% {
+      box-shadow: 0 0 0 0 var(--dot-glow, rgba(139, 155, 180, 0.55));
+    }
+    70% {
+      box-shadow: 0 0 0 9px rgba(14, 20, 32, 0);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(14, 20, 32, 0);
+    }
+  }
+
+  .state-normal {
+    --dot-color: var(--ok);
+    --dot-glow: rgba(52, 211, 153, 0.55);
+  }
+
+  .state-scheduled-standby {
+    --dot-color: var(--alert);
+    --dot-glow: rgba(248, 113, 113, 0.55);
+  }
+
+  .state-manual-override {
+    --dot-color: var(--stale);
+    --dot-glow: rgba(240, 162, 61, 0.55);
+  }
+
+  .state-screensaver,
+  .state-touch-wake {
+    --dot-color: var(--accent);
+    --dot-glow: rgba(56, 189, 248, 0.55);
+  }
+
+  .state-label {
+    font-size: 1.45rem;
+    font-weight: 650;
+    letter-spacing: -0.015em;
+    color: var(--text);
+  }
+
+  .hero-meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--rule);
+  }
+
+  .meta-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .meta-key {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .meta-value {
+    font-family: var(--mono);
+    font-size: 0.98rem;
+    font-weight: 600;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0.25rem 0 0.5rem;
+  }
+
+  .section-title {
+    font-size: 0.72rem;
+    font-weight: 650;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .freshness-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.65rem;
+  }
+
+  .freshness-card {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 0.55rem;
+    padding: 0.8rem 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .freshness-name {
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .freshness-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--mono);
+    font-size: 0.92rem;
+    font-weight: 600;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .status-fresh .status-dot {
+    background: var(--ok);
+  }
+
+  .status-fresh .freshness-status-text {
+    color: var(--ok);
+  }
+
+  .status-stale .status-dot {
+    background: var(--stale);
+  }
+
+  .status-stale .freshness-status-text {
+    color: var(--stale);
+  }
+
+  .status-unavailable .status-dot {
+    background: var(--alert);
+  }
+
+  .status-unavailable .freshness-status-text {
+    color: var(--alert);
+  }
+
+  .actions-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+  }
+
+  .action-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
+  }
+
+  button {
+    min-height: 44px;
+    font-family: var(--sans);
+    font-size: 0.92rem;
+    font-weight: 600;
+    padding: 0.65rem 0.95rem;
+    border: 1px solid var(--rule);
+    border-radius: 0.45rem;
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.08s ease, opacity 0.15s ease;
+  }
+
+  button:hover:not(:disabled) {
+    background: var(--card-hover);
+    border-color: #3d4f68;
+  }
+
+  button:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  button:disabled {
+    opacity: 0.55;
+    cursor: wait;
+  }
+
+  button.btn-primary {
+    background: rgba(56, 189, 248, 0.14);
+    border-color: rgba(56, 189, 248, 0.45);
+    color: var(--accent);
+  }
+
+  button.btn-primary:hover:not(:disabled) {
+    background: rgba(56, 189, 248, 0.22);
+    border-color: var(--accent);
+  }
+
+  button.btn-on {
+    border-color: rgba(52, 211, 153, 0.4);
+    color: var(--ok);
+  }
+
+  button.btn-on:hover:not(:disabled) {
+    background: rgba(52, 211, 153, 0.14);
+    border-color: var(--ok);
+  }
+
+  button.btn-off {
+    border-color: rgba(248, 113, 113, 0.4);
+    color: var(--alert);
+  }
+
+  button.btn-off:hover:not(:disabled) {
+    background: rgba(248, 113, 113, 0.14);
+    border-color: var(--alert);
+  }
+
+  button.btn-clear {
+    border-color: rgba(240, 162, 61, 0.45);
+    color: var(--stale);
+  }
+
+  button.btn-clear:hover:not(:disabled) {
+    background: rgba(240, 162, 61, 0.14);
+    border-color: var(--stale);
+  }
+
+  button.btn-clear.is-highlighted {
+    background: rgba(240, 162, 61, 0.18);
+    border-color: var(--stale);
+  }
+
+  button.btn-muted {
+    color: var(--muted);
+  }
+
+  button.is-loading {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .panel-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--muted);
+    padding-top: 0.2rem;
+  }
+
+  .error-banner {
+    display: none;
+    background: rgba(248, 113, 113, 0.12);
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    border-radius: 0.5rem;
+    padding: 0.7rem 0.9rem;
+    color: var(--alert);
+    font-size: 0.88rem;
+  }
+
+  .error-banner.is-visible {
+    display: block;
+  }
+
+  @media (max-width: 420px) {
+    .token-row {
+      flex-direction: column;
+    }
+
+    .freshness-grid,
+    .action-grid,
+    .hero-meta {
+      grid-template-columns: 1fr;
+    }
+  }
 </style>
 </head>
 <body>
-<h1>pi-dashboard control</h1>
+<main class="shell">
+  <header class="topbar">
+    <div class="brand">
+      <span class="eyebrow">Display Telemetry</span>
+      <h1>pi-dashboard control</h1>
+    </div>
+  </header>
 
-<div id="token-form">
-  <p>Enter the control token:</p>
-  <input id="token-input" type="password" autocomplete="off">
-  <button id="save-token">Save</button>
-</div>
+  <section id="token-form" class="card token-card">
+    <label for="token-input">Control Bearer Token</label>
+    <div class="token-row">
+      <input id="token-input" type="password" autocomplete="off" placeholder="Enter control token">
+      <button id="save-token" type="button" class="btn-primary">Connect</button>
+    </div>
+  </section>
 
-<div id="panel">
-  <dl id="status"></dl>
-  <button data-action="on">Turn on</button>
-  <button data-action="off">Turn off</button>
-  <button data-action="clear">Clear override</button>
-  <button id="forget-token">Forget token</button>
-</div>
+  <div id="panel">
+    <section id="hero-card" class="card hero-card">
+      <div class="hero-top">
+        <div class="state-display">
+          <span id="state-dot" class="pulse-dot" aria-hidden="true"></span>
+          <span id="state-label" class="state-label">Connecting...</span>
+        </div>
+        <span id="hero-version" class="version-badge">--</span>
+      </div>
+      <div class="hero-meta">
+        <div class="meta-block">
+          <span class="meta-key">Uptime</span>
+          <span id="uptime-value" class="meta-value">--</span>
+        </div>
+        <div class="meta-block">
+          <span class="meta-key">Last Updated</span>
+          <span id="last-updated" class="meta-value">--</span>
+        </div>
+      </div>
+    </section>
 
-<p id="error"></p>
+    <div class="section-heading">
+      <span class="section-title">Panel Freshness</span>
+    </div>
+    <section id="freshness-grid" class="freshness-grid" aria-live="polite"></section>
+
+    <div class="section-heading">
+      <span class="section-title">Display Controls</span>
+    </div>
+    <section class="card actions-card">
+      <div class="action-grid">
+        <button type="button" class="btn-on" data-action="on">Turn On</button>
+        <button type="button" class="btn-off" data-action="off">Turn Off</button>
+        <button type="button" class="btn-clear" data-action="clear">Clear Override</button>
+        <button type="button" class="btn-muted" id="forget-token">Forget Token</button>
+      </div>
+      <div class="panel-footer">
+        <span id="action-feedback">Ready</span>
+        <span id="poll-indicator">Auto-refresh 5s</span>
+      </div>
+    </section>
+  </div>
+
+  <p id="error" class="error-banner" role="alert"></p>
+</main>
 
 <script>
 const STORAGE_KEY = "pi-dashboard-control-token";
+const PANEL_ORDER = [
+  { key: "weather", title: "Weather" },
+  { key: "departures", title: "Departures" },
+  { key: "standings", title: "Standings" },
+  { key: "screensaver", title: "Screensaver" },
+];
+const STATE_LABELS = {
+  normal: "Normal",
+  "scheduled-standby": "Scheduled Standby",
+  "manual-override": "Manual Override",
+  screensaver: "Screensaver",
+  "touch-wake": "Touch Wake",
+};
+const FRESHNESS_LABELS = {
+  fresh: "Fresh",
+  stale: "Stale",
+  unavailable: "Unavailable",
+};
+
 const tokenForm = document.getElementById("token-form");
+const tokenInput = document.getElementById("token-input");
 const panel = document.getElementById("panel");
 const errorEl = document.getElementById("error");
-const statusEl = document.getElementById("status");
+const heroVersion = document.getElementById("hero-version");
+const stateDot = document.getElementById("state-dot");
+const stateLabel = document.getElementById("state-label");
+const uptimeValue = document.getElementById("uptime-value");
+const lastUpdated = document.getElementById("last-updated");
+const freshnessGrid = document.getElementById("freshness-grid");
+const actionFeedback = document.getElementById("action-feedback");
+const actionButtons = Array.from(document.querySelectorAll("#panel button[data-action]"));
+const clearButton = document.querySelector('#panel button[data-action="clear"]');
 let pollTimer = null;
+let sessionGeneration = 0;
+let isRefreshing = false;
+let lastFreshnessKey = null;
 
 function token() {
   return localStorage.getItem(STORAGE_KEY);
+}
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function formatUptime(seconds) {
+  const numeric = Number(seconds);
+  const total = Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : 0;
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (days > 0) {
+    return `${days}d ${pad2(hours)}h ${pad2(minutes)}m`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${pad2(minutes)}m ${pad2(secs)}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${pad2(secs)}s`;
+  }
+  return `${secs}s`;
+}
+
+function formatVersion(version) {
+  const clean = String(version || "").trim();
+  if (!clean) {
+    return "--";
+  }
+  return clean.startsWith("v") ? clean : `v${clean}`;
+}
+
+function formatStateLabel(rawState) {
+  return Object.hasOwn(STATE_LABELS, rawState)
+    ? STATE_LABELS[rawState]
+    : String(rawState || "Unknown");
+}
+
+function parsePanelFreshness(rawFreshness) {
+  const map = new Map();
+  const entries = String(rawFreshness || "").split(",");
+  for (const entry of entries) {
+    const trimmed = entry.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const separatorIndex = trimmed.indexOf("=");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, separatorIndex).trim().toLowerCase();
+    const status = trimmed.slice(separatorIndex + 1).trim().toLowerCase();
+    if (key) {
+      map.set(key, status);
+    }
+  }
+  return map;
+}
+
+function renderFreshnessGrid(panelFreshness) {
+  const freshnessKey = String(panelFreshness || "");
+  if (freshnessKey === lastFreshnessKey) {
+    return;
+  }
+  lastFreshnessKey = freshnessKey;
+  const parsed = parsePanelFreshness(freshnessKey);
+  const cards = PANEL_ORDER.map(({ key, title }) => {
+    const rawStatus = parsed.get(key) || "unavailable";
+    const normalized = Object.hasOwn(FRESHNESS_LABELS, rawStatus) ? rawStatus : "unavailable";
+
+    const card = document.createElement("div");
+    card.className = `freshness-card status-${normalized}`;
+
+    const nameEl = document.createElement("span");
+    nameEl.className = "freshness-name";
+    nameEl.textContent = title;
+
+    const statusRow = document.createElement("div");
+    statusRow.className = "freshness-status";
+
+    const dot = document.createElement("span");
+    dot.className = "status-dot";
+    dot.setAttribute("aria-hidden", "true");
+
+    const statusText = document.createElement("span");
+    statusText.className = "freshness-status-text";
+    statusText.textContent = FRESHNESS_LABELS[normalized];
+
+    statusRow.append(dot, statusText);
+    card.append(nameEl, statusRow);
+    return card;
+  });
+  freshnessGrid.replaceChildren(...cards);
+}
+
+function formatTimestamp(date) {
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+}
+
+function renderStatusReport(report) {
+  const rawState = String(report.state || "");
+  const stateClass = Object.hasOwn(STATE_LABELS, rawState) ? `state-${rawState}` : "state-unknown";
+  stateLabel.textContent = formatStateLabel(rawState);
+  stateDot.className = `pulse-dot ${stateClass}`;
+
+  heroVersion.textContent = formatVersion(report.version);
+  uptimeValue.textContent = formatUptime(report.uptime_s);
+  lastUpdated.textContent = formatTimestamp(new Date());
+
+  renderFreshnessGrid(report.panel_freshness);
+
+  if (clearButton) {
+    clearButton.classList.toggle("is-highlighted", rawState === "manual-override");
+  }
 }
 
 function startPolling() {
@@ -60,30 +681,53 @@ function stopPolling() {
 }
 
 function showTokenForm() {
-  tokenForm.style.display = "block";
+  tokenForm.style.display = "flex";
   panel.style.display = "none";
 }
 
 function showPanel() {
   tokenForm.style.display = "none";
-  panel.style.display = "block";
+  panel.style.display = "flex";
+  panel.style.flexDirection = "column";
+  panel.style.gap = "0.75rem";
 }
 
 function setError(message) {
-  errorEl.textContent = message || "";
+  const text = message || "";
+  errorEl.textContent = text;
+  errorEl.classList.toggle("is-visible", Boolean(text));
 }
 
-async function authedFetch(path, options) {
+function setActionsBusy(activeButton, busyLabel) {
+  for (const button of actionButtons) {
+    button.disabled = Boolean(activeButton);
+    button.classList.toggle("is-loading", button === activeButton);
+  }
+  actionFeedback.textContent = busyLabel || "Ready";
+}
+
+async function authedFetch(path, options, generation) {
+  const activeToken = token();
+  if (!activeToken || generation !== sessionGeneration) {
+    throw new Error("stale-session");
+  }
   const response = await fetch(path, {
     ...options,
     headers: {
       ...(options && options.headers),
-      Authorization: `Bearer ${token()}`,
+      Authorization: `Bearer ${activeToken}`,
     },
   });
+  if (generation !== sessionGeneration) {
+    throw new Error("stale-session");
+  }
   if (response.status === 401) {
+    sessionGeneration += 1;
+    isRefreshing = false;
+    lastFreshnessKey = null;
     stopPolling();
     localStorage.removeItem(STORAGE_KEY);
+    tokenInput.value = "";
     showTokenForm();
     setError("Token rejected; enter it again.");
     throw new Error("unauthorized");
@@ -92,69 +736,128 @@ async function authedFetch(path, options) {
 }
 
 async function refreshStatus() {
+  if (isRefreshing || !token()) {
+    return;
+  }
+  const generation = sessionGeneration;
+  isRefreshing = true;
   try {
-    const response = await authedFetch("/status");
+    const response = await authedFetch("/status", undefined, generation);
+    if (generation !== sessionGeneration) {
+      return;
+    }
     if (!response.ok) {
-      setError(`status request failed: ${response.status}`);
+      setError(`Status request failed: ${response.status}`);
       return;
     }
     const report = await response.json();
-    setError("");
-    const nodes = [];
-    for (const [key, value] of Object.entries(report)) {
-      const dt = document.createElement("dt");
-      dt.textContent = key;
-      const dd = document.createElement("dd");
-      dd.textContent = String(value);
-      nodes.push(dt, dd);
-    }
-    statusEl.replaceChildren(...nodes);
-  } catch (error) {
-    if (error.message !== "unauthorized") {
-      setError(String(error));
-    }
-  }
-}
-
-async function sendAction(action) {
-  try {
-    const response = await authedFetch("/control", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action }),
-    });
-    if (!response.ok) {
-      setError(`control request failed: ${response.status}`);
+    if (generation !== sessionGeneration) {
       return;
     }
-    await refreshStatus();
+    setError("");
+    renderStatusReport(report);
   } catch (error) {
-    if (error.message !== "unauthorized") {
+    if (generation !== sessionGeneration) {
+      return;
+    }
+    if (error.message !== "unauthorized" && error.message !== "stale-session") {
       setError(String(error));
+    }
+  } finally {
+    if (generation === sessionGeneration) {
+      isRefreshing = false;
     }
   }
 }
 
-document.getElementById("save-token").addEventListener("click", () => {
-  const value = document.getElementById("token-input").value.trim();
+async function sendAction(action, triggerButton) {
+  if (!token()) {
+    return;
+  }
+  const generation = sessionGeneration;
+  const labelMap = {
+    on: "Sending Turn On...",
+    off: "Sending Turn Off...",
+    clear: "Clearing override...",
+  };
+  let nextFeedback = "Ready";
+  const busyLabel = Object.hasOwn(labelMap, action) ? labelMap[action] : "Sending command...";
+  setActionsBusy(triggerButton, busyLabel);
+  try {
+    const response = await authedFetch(
+      "/control",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      },
+      generation,
+    );
+    if (generation !== sessionGeneration) {
+      return;
+    }
+    if (!response.ok) {
+      setError(`Control request failed: ${response.status}`);
+      return;
+    }
+    const report = await response.json();
+    if (generation !== sessionGeneration) {
+      return;
+    }
+    setError("");
+    renderStatusReport(report);
+    nextFeedback = `Applied at ${formatTimestamp(new Date())}`;
+  } catch (error) {
+    if (generation !== sessionGeneration) {
+      return;
+    }
+    if (error.message !== "unauthorized" && error.message !== "stale-session") {
+      setError(String(error));
+    }
+  } finally {
+    setActionsBusy(null, generation === sessionGeneration ? nextFeedback : "Ready");
+  }
+}
+
+function submitToken() {
+  const value = tokenInput.value.trim();
   if (!value) {
     return;
   }
+  sessionGeneration += 1;
+  isRefreshing = false;
+  lastFreshnessKey = null;
   localStorage.setItem(STORAGE_KEY, value);
+  tokenInput.value = "";
+  setError("");
   showPanel();
   refreshStatus();
   startPolling();
+}
+
+document.getElementById("save-token").addEventListener("click", submitToken);
+
+tokenInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    submitToken();
+  }
 });
 
 document.getElementById("forget-token").addEventListener("click", () => {
+  sessionGeneration += 1;
+  isRefreshing = false;
+  lastFreshnessKey = null;
   stopPolling();
   localStorage.removeItem(STORAGE_KEY);
+  tokenInput.value = "";
+  setError("");
   showTokenForm();
 });
 
-document.querySelectorAll("#panel button[data-action]").forEach((button) => {
-  button.addEventListener("click", () => sendAction(button.dataset.action));
-});
+for (const button of actionButtons) {
+  button.addEventListener("click", () => sendAction(button.dataset.action, button));
+}
 
 if (token()) {
   showPanel();

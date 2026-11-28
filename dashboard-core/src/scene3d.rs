@@ -14,6 +14,7 @@ use crate::daylight::DaylightWindow;
 use crate::theme::palette;
 
 pub const FLIP_DURATION_SECONDS: f32 = 0.34;
+pub const PANEL_FLIP_DURATION_SECONDS: f32 = 0.36;
 
 const SOLAR_ARC_HALF_SPAN_X: f32 = 3.2;
 const SOLAR_ARC_PEAK_Y: f32 = 1.7;
@@ -29,6 +30,7 @@ const DIORAMA_PLINTH_BASE_RX: f32 = 3.94;
 const DIORAMA_PLINTH_RZ: f32 = 2.26;
 const CLOUD_SHADOW_RADIUS: f32 = 0.52;
 const PRISM_SIDES: usize = 6;
+const DIORAMA_NIGHT_STAR_COUNT: usize = 12;
 
 fn clamp_logical_rect(
     x: f32,
@@ -1954,7 +1956,7 @@ fn draw_diorama_translucent_effects(
         let slot = (idx / clouds.len()) as f32;
         let lane_x = ((slot * 0.37 + 0.19).fract() - 0.5) * 0.72;
         let lane_z = ((slot * 0.61 + 0.31).fract() - 0.5) * 0.42;
-        let fall_t = (orbit_time_s * 1.45 + (idx as f32) * 0.23).fract();
+        let fall_t = (orbit_time_s * 1.45 + (idx as f32) * 0.23).rem_euclid(1.0);
         let top_y = (cloud.y - 0.22) * (1.0 - fall_t) + 0.28 * fall_t;
         let streak_len = 0.24;
         let start = vec3(cloud.x + lane_x, top_y, cloud.z + lane_z);
@@ -2081,6 +2083,7 @@ pub fn render_solar_diorama_3d(
 
     let sun_pos = diorama_point_scaled(scene.sun_position, x_scale);
     let clouds = diorama_cloud_centers(precip_probability_pct, x_scale, safe_time);
+    draw_diorama_night_sky_opaque(scene, x_scale, safe_time, view_dir);
     draw_diorama_sun_and_armillary_opaque(scene, sun_pos, safe_time, light_dir, view_dir);
     draw_diorama_clouds_opaque(&clouds, light_dir, view_dir);
     draw_diorama_translucent_effects(
@@ -2094,4 +2097,519 @@ pub fn render_solar_diorama_3d(
     );
 
     set_default_camera();
+}
+
+pub fn diorama_night_sky_visibility(phase: SolarPhase) -> f32 {
+    match phase {
+        SolarPhase::Night => 1.0,
+        SolarPhase::CivilDawn | SolarPhase::CivilDusk => 0.45,
+        SolarPhase::Day | SolarPhase::GoldenHour => 0.0,
+    }
+}
+
+pub fn diorama_night_progress(scene: &SolarSceneState) -> f32 {
+    match scene.phase {
+        SolarPhase::CivilDusk => {
+            let twilight_t = (-scene.sun_altitude_norm / 0.22).clamp(0.0, 1.0);
+            0.08 * twilight_t
+        }
+        SolarPhase::Night => {
+            let sun_x = if scene.sun_position[0].is_finite() {
+                scene.sun_position[0]
+            } else {
+                0.0
+            };
+            let x_norm = (sun_x / SOLAR_ARC_HALF_SPAN_X).clamp(-1.0, 1.0);
+            if x_norm >= 0.0 {
+                0.08 + 0.42 * (1.0 - x_norm)
+            } else {
+                0.50 + 0.42 * (-x_norm)
+            }
+        }
+        SolarPhase::CivilDawn => {
+            let twilight_t = 1.0 - (-scene.sun_altitude_norm / 0.22).clamp(0.0, 1.0);
+            0.92 + 0.08 * twilight_t
+        }
+        SolarPhase::Day | SolarPhase::GoldenHour => {
+            if scene.daylight_fraction.is_finite() {
+                scene.daylight_fraction.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
+pub fn diorama_moon_position(night_progress: f32, x_scale: f32) -> Vec3 {
+    let safe_scale = if x_scale.is_finite() {
+        x_scale.max(1.0)
+    } else {
+        1.0
+    };
+    let frac = if night_progress.is_finite() {
+        night_progress.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let x = (frac - 0.5) * 4.4 * safe_scale;
+    let arc = ((frac - 0.5) * PI).cos().max(0.0);
+    let y = 1.64 + arc * 0.20;
+    vec3(x, y, -1.15)
+}
+
+fn draw_diorama_night_sky_opaque(
+    scene: &SolarSceneState,
+    x_scale: f32,
+    orbit_time_s: f32,
+    view_dir: Vec3,
+) {
+    let visibility = diorama_night_sky_visibility(scene.phase);
+    if visibility <= 0.0 {
+        return;
+    }
+
+    let star_light_dir = vec3(0.25, 0.85, 0.46).normalize();
+    let star_peak_color = Color::new(0.86, 0.92, 1.0, 1.0);
+    for i in 0..DIORAMA_NIGHT_STAR_COUNT {
+        let idx_f = i as f32;
+        let u = (idx_f + 0.5) / DIORAMA_NIGHT_STAR_COUNT as f32;
+        let arc_norm = u * 2.0 - 1.0;
+        let sx = arc_norm * 3.0 * x_scale;
+        let sy = 1.50 + (1.0 - arc_norm * arc_norm) * 0.44 + (idx_f * 2.37).sin() * 0.14;
+        let sz = -1.65 - (i % 3) as f32 * 0.20;
+        let speed = 1.15 + (i % 4) as f32 * 0.35;
+        let twinkle = 0.65 + 0.35 * (orbit_time_s * speed + idx_f * 1.9).sin();
+        let intensity = ((0.30 + 0.70 * visibility) * twinkle).clamp(0.0, 1.0);
+        let blended = blend_color(scene.sky_tint, star_peak_color, intensity);
+        let star_color = Color::new(blended.r, blended.g, blended.b, 1.0);
+        let radius = 0.036 + 0.014 * ((i % 3) as f32 * 0.5);
+        let star_mesh = build_lit_icosphere_mesh(
+            vec3(sx, sy, sz),
+            radius,
+            0,
+            star_color,
+            star_light_dir,
+            view_dir,
+            0.65 * visibility,
+        );
+        draw_mesh(&star_mesh);
+    }
+
+    let moon_pos = diorama_moon_position(diorama_night_progress(scene), x_scale);
+    let moon_light_dir = vec3(-0.62, 0.54, 0.56).normalize();
+    let moon_blended = blend_color(
+        scene.sky_tint,
+        Color::new(0.76, 0.85, 0.98, 1.0),
+        0.45 + 0.55 * visibility,
+    );
+    let moon_color = Color::new(moon_blended.r, moon_blended.g, moon_blended.b, 1.0);
+    let moon_mesh = build_lit_icosphere_mesh(
+        moon_pos,
+        0.24,
+        2,
+        moon_color,
+        moon_light_dir,
+        view_dir,
+        0.28 * visibility,
+    );
+    draw_mesh(&moon_mesh);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeatherGlyphKind {
+    ClearSun,
+    PartlyCloudy,
+    Rain,
+    Snow,
+}
+
+pub fn classify_weather_glyph(temp_c: f64, precip_probability_pct: u8) -> WeatherGlyphKind {
+    if precip_probability_pct < 15 {
+        WeatherGlyphKind::ClearSun
+    } else if precip_probability_pct < 35 {
+        WeatherGlyphKind::PartlyCloudy
+    } else if temp_c <= 0.5 {
+        WeatherGlyphKind::Snow
+    } else {
+        WeatherGlyphKind::Rain
+    }
+}
+
+pub fn weather_glyph_camera(rect_w: f32, rect_h: f32) -> Camera3D {
+    let safe_w = if rect_w.is_finite() {
+        rect_w.max(1.0)
+    } else {
+        1.0
+    };
+    let safe_h = if rect_h.is_finite() {
+        rect_h.max(1.0)
+    } else {
+        1.0
+    };
+    let aspect = (safe_w / safe_h).max(0.1);
+    let fovy = 32.0_f32.to_radians();
+    let min_dim_scale = aspect.min(1.0);
+    let distance = (1.22 / min_dim_scale) / (fovy * 0.5).tan() + 0.88;
+
+    Camera3D {
+        position: vec3(0.0, 0.42, distance),
+        target: vec3(0.0, 0.0, 0.0),
+        up: Vec3::Y,
+        fovy,
+        aspect: Some(aspect),
+        projection: Projection::Perspective,
+        ..Default::default()
+    }
+}
+
+fn draw_weather_cloud_cluster_3d(
+    puffs: &[(Vec3, f32)],
+    yaw: f32,
+    bob_y: f32,
+    color: Color,
+    emissive: f32,
+    light_dir: Vec3,
+    view_dir: Vec3,
+) {
+    for &(offset, radius) in puffs {
+        let pos = rotate_vec3_y(offset, yaw) + vec3(0.0, bob_y, 0.0);
+        let mesh = build_lit_icosphere_mesh(pos, radius, 1, color, light_dir, view_dir, emissive);
+        draw_mesh(&mesh);
+    }
+}
+
+pub fn render_weather_glyph_3d(
+    kind: WeatherGlyphKind,
+    orbit_time_s: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) {
+    let screen_w = screen_width();
+    let screen_h = screen_height();
+    let Some((rect_x, rect_y, rect_w, rect_h)) =
+        clamp_logical_rect(x, y, width, height, screen_w, screen_h)
+    else {
+        return;
+    };
+    let Some(viewport) =
+        viewport_rect_to_gl(rect_x, rect_y, rect_w, rect_h, screen_h, screen_dpi_scale())
+    else {
+        return;
+    };
+
+    let safe_time = if orbit_time_s.is_finite() {
+        orbit_time_s
+    } else {
+        0.0
+    };
+    let mut camera = weather_glyph_camera(rect_w, rect_h);
+    camera.viewport = Some(viewport);
+
+    let light_dir = vec3(0.42, 0.80, 0.62).normalize();
+    let view_dir = (camera.position - camera.target).normalize_or_zero();
+    let bob_y = (safe_time * 1.4).sin() * 0.035;
+
+    set_camera(&camera);
+
+    match kind {
+        WeatherGlyphKind::ClearSun => {
+            let sun_color = Color::new(1.0, 0.82, 0.28, 1.0);
+            let ring_color = Color::new(1.0, 0.68, 0.20, 1.0);
+            let sun_center = vec3(0.0, bob_y, 0.0);
+            let sun_mesh =
+                build_lit_icosphere_mesh(sun_center, 0.46, 2, sun_color, light_dir, view_dir, 0.45);
+            draw_mesh(&sun_mesh);
+
+            let ring_segments = 14;
+            let ring_radius = 0.76;
+            let tilt_x = 0.48;
+            let spin_y = safe_time * 0.85;
+            let mut ring_points = Vec::with_capacity(ring_segments);
+            for i in 0..ring_segments {
+                let angle = (i as f32 / ring_segments as f32) * TAU;
+                let local = vec3(angle.cos() * ring_radius, 0.0, angle.sin() * ring_radius);
+                let tilted = rotate_vec3_x(local, tilt_x);
+                let spun = rotate_vec3_y(tilted, spin_y);
+                ring_points.push(sun_center + spun);
+            }
+            for i in 0..ring_segments {
+                let p0 = ring_points[i];
+                let p1 = ring_points[(i + 1) % ring_segments];
+                let seg =
+                    build_lit_prism_segment_mesh(p0, p1, 0.044, ring_color, light_dir, view_dir);
+                draw_mesh(&seg);
+            }
+        }
+        WeatherGlyphKind::PartlyCloudy => {
+            let yaw = (safe_time * 0.60).sin() * 0.28;
+            let sun_pos = rotate_vec3_y(vec3(0.32, 0.26, -0.24), yaw) + vec3(0.0, bob_y * 0.6, 0.0);
+            let sun_mesh = build_lit_icosphere_mesh(
+                sun_pos,
+                0.33,
+                2,
+                Color::new(1.0, 0.82, 0.30, 1.0),
+                light_dir,
+                view_dir,
+                0.48,
+            );
+            draw_mesh(&sun_mesh);
+
+            let puffs = [
+                (vec3(-0.08, -0.06, 0.14), 0.33),
+                (vec3(-0.42, -0.14, 0.18), 0.25),
+                (vec3(0.28, -0.12, 0.16), 0.26),
+            ];
+            draw_weather_cloud_cluster_3d(
+                &puffs,
+                yaw,
+                bob_y,
+                Color::new(0.86, 0.91, 0.97, 1.0),
+                0.12,
+                light_dir,
+                view_dir,
+            );
+        }
+        WeatherGlyphKind::Rain => {
+            let yaw = (safe_time * 0.55).sin() * 0.24;
+            let puffs = [
+                (vec3(0.0, 0.24, 0.0), 0.34),
+                (vec3(-0.36, 0.14, 0.06), 0.26),
+                (vec3(0.36, 0.16, -0.04), 0.26),
+            ];
+            draw_weather_cloud_cluster_3d(
+                &puffs,
+                yaw,
+                bob_y * 0.5,
+                Color::new(0.56, 0.66, 0.78, 1.0),
+                0.06,
+                light_dir,
+                view_dir,
+            );
+
+            let rain_color = Color::new(0.36, 0.86, 1.0, 1.0);
+            let lanes: [(f32, f32); 4] =
+                [(-0.42, -0.06), (-0.14, 0.08), (0.14, -0.05), (0.42, 0.07)];
+            for (idx, &(lx, lz)) in lanes.iter().enumerate() {
+                let fall_t = (safe_time * 1.35 + idx as f32 * 0.27).rem_euclid(1.0);
+                let top_y = -0.04 * (1.0 - fall_t) + (-0.56) * fall_t;
+                let start = rotate_vec3_y(vec3(lx, top_y, lz), yaw);
+                let end = rotate_vec3_y(vec3(lx - 0.08, top_y - 0.22, lz), yaw);
+                let drop = build_lit_prism_segment_mesh(
+                    start, end, 0.036, rain_color, light_dir, view_dir,
+                );
+                draw_mesh(&drop);
+            }
+        }
+        WeatherGlyphKind::Snow => {
+            let yaw = (safe_time * 0.50).sin() * 0.24;
+            let puffs = [
+                (vec3(0.0, 0.26, 0.0), 0.34),
+                (vec3(-0.36, 0.16, 0.06), 0.26),
+                (vec3(0.36, 0.18, -0.04), 0.26),
+            ];
+            draw_weather_cloud_cluster_3d(
+                &puffs,
+                yaw,
+                bob_y * 0.5,
+                Color::new(0.88, 0.94, 1.0, 1.0),
+                0.18,
+                light_dir,
+                view_dir,
+            );
+
+            let crystal_color = Color::new(0.76, 0.93, 1.0, 1.0);
+            let lanes: [(f32, f32); 4] =
+                [(-0.42, -0.06), (-0.14, 0.08), (0.14, -0.05), (0.42, 0.07)];
+            for (idx, &(lx, lz)) in lanes.iter().enumerate() {
+                let idx_f = idx as f32;
+                let fall_t = (safe_time * 0.65 + idx_f * 0.25).rem_euclid(1.0);
+                let fy = -0.08 * (1.0 - fall_t) + (-0.72) * fall_t;
+                let fx = lx + (safe_time * 1.4 + idx_f * 1.7).sin() * 0.07;
+                let center = rotate_vec3_y(vec3(fx, fy, lz), yaw);
+                let tumble = safe_time * 1.8 + idx_f * 1.1;
+
+                let core = build_lit_transformed_box_mesh(
+                    center,
+                    vec3(0.054, 0.054, 0.054),
+                    tumble,
+                    Vec3::ZERO,
+                    crystal_color,
+                    light_dir,
+                    view_dir,
+                );
+                draw_mesh(&core);
+
+                let spike_dir = rotate_vec3_y(rotate_vec3_x(vec3(0.0, 0.095, 0.0), tumble), yaw);
+                let spike = build_lit_prism_segment_mesh(
+                    center - spike_dir,
+                    center + spike_dir,
+                    0.022,
+                    crystal_color,
+                    light_dir,
+                    view_dir,
+                );
+                draw_mesh(&spike);
+            }
+        }
+    }
+
+    set_default_camera();
+}
+
+pub fn render_screensaver_backdrop_3d(orbit_time_s: f32, width: f32, height: f32) {
+    let screen_w = screen_width();
+    let screen_h = screen_height();
+    let Some((rect_x, rect_y, rect_w, rect_h)) =
+        clamp_logical_rect(0.0, 0.0, width, height, screen_w, screen_h)
+    else {
+        return;
+    };
+    let Some(viewport) =
+        viewport_rect_to_gl(rect_x, rect_y, rect_w, rect_h, screen_h, screen_dpi_scale())
+    else {
+        return;
+    };
+
+    draw_rectangle(
+        rect_x,
+        rect_y,
+        rect_w,
+        rect_h,
+        Color::new(0.03, 0.05, 0.09, 1.0),
+    );
+
+    let safe_time = if orbit_time_s.is_finite() {
+        orbit_time_s
+    } else {
+        0.0
+    };
+    let aspect = (rect_w / rect_h).max(0.1);
+    let cam_x = (safe_time * 0.08).sin() * 0.35;
+    let cam_y = 0.55 + (safe_time * 0.06).cos() * 0.12;
+    let camera = Camera3D {
+        position: vec3(cam_x, cam_y, 9.0),
+        target: vec3(0.0, 0.0, -4.0),
+        up: Vec3::Y,
+        fovy: 38.0_f32.to_radians(),
+        aspect: Some(aspect),
+        projection: Projection::Perspective,
+        viewport: Some(viewport),
+        ..Default::default()
+    };
+
+    let light_dir = vec3(0.20, 0.82, 0.54).normalize();
+    let view_dir = (camera.position - camera.target).normalize_or_zero();
+
+    set_camera(&camera);
+
+    let star_count = 36_usize;
+    let half_span_x = 10.5 * aspect.clamp(1.0, 2.4);
+    let span_x = half_span_x * 2.0;
+    for i in 0..star_count {
+        let idx_f = i as f32;
+        let layer = (i % 3) as f32;
+        let z = -3.2 - layer * 4.2 - (idx_f * 1.37).sin().abs() * 1.8;
+        let speed = 0.08 + (2.0 - layer) * 0.07;
+        let base_x = ((idx_f * 0.618034).fract() * 2.0 - 1.0) * half_span_x;
+        let x = (base_x + safe_time * speed + half_span_x).rem_euclid(span_x) - half_span_x;
+        let y = ((idx_f * 0.414213).fract() * 2.0 - 1.0) * 5.2;
+        let twinkle = 0.55 + 0.45 * (safe_time * (0.45 + layer * 0.25) + idx_f * 1.7).sin();
+        let depth_dim = 1.0 - layer * 0.22;
+        let brightness = twinkle * depth_dim;
+        let color = Color::new(
+            0.16 + 0.20 * brightness,
+            0.24 + 0.26 * brightness,
+            0.38 + 0.34 * brightness,
+            1.0,
+        );
+        let radius = 0.042 + (2.0 - layer) * 0.014;
+        let star =
+            build_lit_icosphere_mesh(vec3(x, y, z), radius, 0, color, light_dir, view_dir, 0.35);
+        draw_mesh(&star);
+    }
+
+    let ring_segments = 28;
+    let ring_rx = 8.4 * aspect.clamp(1.0, 2.2);
+    let ring_rz = 3.8;
+    let ring_spin = safe_time * 0.04;
+    let rings: [(f32, f32, Color, f32); 2] = [
+        (-2.35, 1.0, Color::new(0.14, 0.26, 0.42, 1.0), 0.055),
+        (-2.68, 0.86, Color::new(0.09, 0.17, 0.30, 1.0), 0.040),
+    ];
+
+    for (ring_y, scale, ring_color, tube_r) in rings {
+        let mut pts = Vec::with_capacity(ring_segments);
+        for i in 0..ring_segments {
+            let angle = (i as f32 / ring_segments as f32) * TAU + ring_spin;
+            let local = vec3(
+                angle.cos() * ring_rx * scale,
+                0.0,
+                angle.sin() * ring_rz * scale,
+            );
+            let tilted = rotate_vec3_x(local, 0.14);
+            pts.push(vec3(tilted.x, ring_y + tilted.y, -9.5 + tilted.z));
+        }
+        for i in 0..ring_segments {
+            let p0 = pts[i];
+            let p1 = pts[(i + 1) % ring_segments];
+            let seg = build_lit_prism_segment_mesh(p0, p1, tube_r, ring_color, light_dir, view_dir);
+            draw_mesh(&seg);
+        }
+    }
+
+    set_default_camera();
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelFlipTransition {
+    active_key: String,
+    progress: f32,
+}
+
+impl PanelFlipTransition {
+    pub fn new(initial_key: &str) -> Self {
+        Self {
+            active_key: initial_key.to_string(),
+            progress: 1.0,
+        }
+    }
+
+    pub fn update(&mut self, key: &str, dt_seconds: f32) {
+        let dt = if dt_seconds.is_finite() {
+            dt_seconds.max(0.0)
+        } else {
+            0.0
+        };
+        if key != self.active_key {
+            self.active_key.clear();
+            self.active_key.push_str(key);
+            self.progress = 0.0;
+        } else if self.progress < 1.0 {
+            self.progress = (self.progress + dt / PANEL_FLIP_DURATION_SECONDS).min(1.0);
+        }
+    }
+
+    pub fn progress(&self) -> f32 {
+        self.progress
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.progress < 1.0
+    }
+
+    pub fn horizontal_scale(&self) -> f32 {
+        let clamped = if self.progress.is_finite() {
+            self.progress.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let eased = ease_in_out_cubic(clamped);
+        (eased * PI).cos().abs().max(0.08)
+    }
+
+    pub fn shade_factor(&self) -> f32 {
+        0.65 + 0.35 * self.horizontal_scale()
+    }
 }

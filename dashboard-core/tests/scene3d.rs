@@ -2,13 +2,15 @@ use std::f32::consts::{FRAC_PI_2, PI};
 
 use dashboard_core::daylight::daylight_window;
 use dashboard_core::scene3d::{
-    FLIP_DURATION_SECONDS, SolarPhase, SplitFlapBoard, SplitFlapSlot, build_lit_box_mesh,
-    build_lit_cylinder_mesh, build_lit_icosphere_mesh, build_lit_prism_segment_mesh,
-    build_lit_transformed_box_mesh, compute_diorama_light_dir, compute_flap_pose,
-    compute_solar_scene, digit_half_segment_boxes, digit_segments, diorama_camera,
-    diorama_cloud_centers, diorama_cloud_count, diorama_hill_base_vertices,
-    diorama_rain_streak_count, is_solar_arc_segment_lit, shade_triangle_color,
-    solar_horizontal_scale, split_flap_camera, split_flap_layout, viewport_rect_to_gl,
+    FLIP_DURATION_SECONDS, PANEL_FLIP_DURATION_SECONDS, PanelFlipTransition, SolarPhase,
+    SplitFlapBoard, SplitFlapSlot, WeatherGlyphKind, build_lit_box_mesh, build_lit_cylinder_mesh,
+    build_lit_icosphere_mesh, build_lit_prism_segment_mesh, build_lit_transformed_box_mesh,
+    classify_weather_glyph, compute_diorama_light_dir, compute_flap_pose, compute_solar_scene,
+    digit_half_segment_boxes, digit_segments, diorama_camera, diorama_cloud_centers,
+    diorama_cloud_count, diorama_hill_base_vertices, diorama_moon_position, diorama_night_progress,
+    diorama_night_sky_visibility, diorama_rain_streak_count, is_solar_arc_segment_lit,
+    shade_triangle_color, solar_horizontal_scale, split_flap_camera, split_flap_layout,
+    viewport_rect_to_gl, weather_glyph_camera,
 };
 use jiff::Timestamp;
 use jiff::civil::date;
@@ -485,7 +487,7 @@ fn split_flap_camera_fits_outer_casings_and_mid_flip_flaps_inside_ndc_across_swa
     let slot_count = 8;
     let sway_times = [0.0_f32, FRAC_PI_2 / 0.45, -FRAC_PI_2 / 0.45];
 
-    for (width, height) in [(300.0_f32, 80.0_f32), (680.0_f32, 190.0_f32)] {
+    for (width, height) in [(300.0_f32, 66.0_f32), (680.0_f32, 190.0_f32)] {
         let layout = split_flap_layout(width, height, slot_count);
         let outer_w = layout.tile_half_w + layout.wall_t;
         let outer_h = layout.tile_half_h + layout.wall_t;
@@ -1038,4 +1040,242 @@ fn diorama_weather_and_lighting_helpers_scale_clouds_rain_and_sun_direction() {
     assert!(afternoon_dir.x > 0.0);
     assert!(morning_dir.y > 0.0);
     assert!(night_dir.y > 0.0);
+}
+
+#[test]
+fn classify_weather_glyph_covers_all_variants_and_threshold_boundaries() {
+    assert_eq!(classify_weather_glyph(18.0, 0), WeatherGlyphKind::ClearSun);
+    assert_eq!(classify_weather_glyph(-5.0, 14), WeatherGlyphKind::ClearSun);
+    assert_eq!(
+        classify_weather_glyph(12.0, 15),
+        WeatherGlyphKind::PartlyCloudy
+    );
+    assert_eq!(
+        classify_weather_glyph(-2.0, 34),
+        WeatherGlyphKind::PartlyCloudy
+    );
+    assert_eq!(classify_weather_glyph(0.5, 35), WeatherGlyphKind::Snow);
+    assert_eq!(classify_weather_glyph(-4.0, 80), WeatherGlyphKind::Snow);
+    assert_eq!(classify_weather_glyph(0.6, 35), WeatherGlyphKind::Rain);
+    assert_eq!(classify_weather_glyph(12.0, 90), WeatherGlyphKind::Rain);
+}
+
+#[test]
+fn weather_glyph_camera_frames_icon_bounds_cleanly_inside_ndc() {
+    let probe_points = [
+        ("center", vec3(0.0, 0.0, 0.0)),
+        ("top", vec3(0.0, 0.85, 0.0)),
+        ("bottom", vec3(0.0, -0.85, 0.0)),
+        ("left", vec3(-0.85, 0.0, 0.0)),
+        ("right", vec3(0.85, 0.0, 0.0)),
+        ("front_top_right", vec3(0.75, 0.75, 0.55)),
+        ("front_bottom_left", vec3(-0.75, -0.75, 0.55)),
+        ("back_top_left", vec3(-0.75, 0.75, -0.55)),
+    ];
+
+    for (width, height) in [
+        (64.0_f32, 64.0_f32),
+        (96.0_f32, 96.0_f32),
+        (120.0_f32, 80.0_f32),
+        (72.0_f32, 108.0_f32),
+    ] {
+        let cam = weather_glyph_camera(width, height);
+        let vp = camera_view_proj(&cam);
+
+        for (label, pt) in probe_points {
+            let ndc = vp.project_point3(pt);
+            assert!(
+                ndc.x.abs() <= 0.90 && ndc.y.abs() <= 0.90,
+                "{width}x{height} {label} exceeded NDC frame: ({:.3}, {:.3})",
+                ndc.x,
+                ndc.y
+            );
+        }
+    }
+}
+
+#[test]
+fn diorama_night_sky_visibility_matches_all_solar_phases() {
+    assert_approx(diorama_night_sky_visibility(SolarPhase::Night), 1.0, 1e-6);
+    assert_approx(
+        diorama_night_sky_visibility(SolarPhase::CivilDawn),
+        0.45,
+        1e-6,
+    );
+    assert_approx(
+        diorama_night_sky_visibility(SolarPhase::CivilDusk),
+        0.45,
+        1e-6,
+    );
+    assert_approx(diorama_night_sky_visibility(SolarPhase::Day), 0.0, 1e-6);
+    assert_approx(
+        diorama_night_sky_visibility(SolarPhase::GoldenHour),
+        0.0,
+        1e-6,
+    );
+}
+
+#[test]
+fn diorama_moon_position_projects_inside_ndc_bounds_across_wide_viewports() {
+    let orbit_samples = [0.0_f32, FRAC_PI_2 / 0.25, -FRAC_PI_2 / 0.25, PI / 0.25];
+    let fraction_samples = [0.0_f32, 0.25, 0.5, 0.75, 1.0];
+
+    for (width, height) in [(1160.0_f32, 174.0_f32), (1880.0_f32, 174.0_f32)] {
+        let x_scale = solar_horizontal_scale(width, height);
+        for orbit_t in orbit_samples {
+            let cam = diorama_camera(width, height, orbit_t);
+            let vp = camera_view_proj(&cam);
+
+            for frac in fraction_samples {
+                let moon = diorama_moon_position(frac, x_scale);
+                assert!(moon.y > 0.8);
+                for offset in [
+                    vec3(0.0, 0.0, 0.0),
+                    vec3(0.24, 0.0, 0.0),
+                    vec3(-0.24, 0.0, 0.0),
+                    vec3(0.0, 0.24, 0.0),
+                    vec3(0.0, -0.24, 0.0),
+                ] {
+                    let ndc = vp.project_point3(moon + offset);
+                    assert!(
+                        ndc.x.abs() <= 0.92 && ndc.y.abs() <= 0.92,
+                        "{width}x{height} t={orbit_t:.2} frac={frac:.2} moon clipped: ndc=({:.3}, {:.3})",
+                        ndc.x,
+                        ndc.y
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn diorama_moon_glides_along_elevated_arc_through_dusk_night_and_dawn_inside_ndc() {
+    let window = daylight_window(
+        STOCKHOLM_TZ,
+        STOCKHOLM_LAT,
+        STOCKHOLM_LON,
+        date(2026, 3, 21),
+    )
+    .expect("equinox daylight window");
+
+    let dawn_ts = window
+        .civil_dawn
+        .in_tz(STOCKHOLM_TZ)
+        .expect("dawn tz")
+        .timestamp();
+    let dusk_ts = window
+        .civil_dusk
+        .in_tz(STOCKHOLM_TZ)
+        .expect("dusk tz")
+        .timestamp();
+
+    let civil_dusk = compute_solar_scene(
+        &window,
+        offset_from_jiff(
+            Timestamp::from_second((window.sunset_utc.as_second() + dusk_ts.as_second()) / 2)
+                .unwrap(),
+        ),
+        STOCKHOLM_TZ,
+    );
+    let evening_night = compute_solar_scene(&window, shift_offset(dusk_ts, 7_200), STOCKHOLM_TZ);
+    let deep_night = compute_solar_scene(&window, shift_offset(dusk_ts, 21_600), STOCKHOLM_TZ);
+    let morning_night = compute_solar_scene(&window, shift_offset(dawn_ts, -7_200), STOCKHOLM_TZ);
+    let civil_dawn = compute_solar_scene(
+        &window,
+        offset_from_jiff(
+            Timestamp::from_second((dawn_ts.as_second() + window.sunrise_utc.as_second()) / 2)
+                .unwrap(),
+        ),
+        STOCKHOLM_TZ,
+    );
+
+    let p_dusk = diorama_night_progress(&civil_dusk);
+    let p_evening = diorama_night_progress(&evening_night);
+    let p_deep = diorama_night_progress(&deep_night);
+    let p_morning = diorama_night_progress(&morning_night);
+    let p_dawn = diorama_night_progress(&civil_dawn);
+
+    assert!(p_dusk > 0.0 && p_dusk < p_evening);
+    assert!(p_evening < p_deep);
+    assert_approx(p_deep, 0.5, 1e-4);
+    assert!(p_deep < p_morning);
+    assert!(p_morning < p_dawn && p_dawn < 1.0);
+
+    let x_scale = solar_horizontal_scale(1160.0, 174.0);
+    let moon_dusk = diorama_moon_position(p_dusk, x_scale);
+    let moon_evening = diorama_moon_position(p_evening, x_scale);
+    let moon_deep = diorama_moon_position(p_deep, x_scale);
+    let moon_morning = diorama_moon_position(p_morning, x_scale);
+    let moon_dawn = diorama_moon_position(p_dawn, x_scale);
+
+    assert!(moon_dusk.y > 1.64);
+    assert!(moon_evening.y > moon_dusk.y);
+    assert!(moon_deep.y > moon_evening.y);
+    assert!(moon_deep.y > moon_morning.y);
+    assert!(moon_morning.y > moon_dawn.y);
+    assert!(moon_dawn.y > 1.64);
+    assert!(moon_dusk.x < moon_evening.x);
+    assert!(moon_evening.x < moon_deep.x);
+    assert!(moon_deep.x < moon_morning.x);
+    assert!(moon_morning.x < moon_dawn.x);
+
+    let cam = diorama_camera(1160.0, 174.0, 0.0);
+    let vp = camera_view_proj(&cam);
+    for moon in [moon_dusk, moon_evening, moon_deep, moon_morning, moon_dawn] {
+        for offset in [
+            vec3(0.0, 0.0, 0.0),
+            vec3(0.24, 0.0, 0.0),
+            vec3(-0.24, 0.0, 0.0),
+            vec3(0.0, 0.24, 0.0),
+            vec3(0.0, -0.24, 0.0),
+        ] {
+            let ndc = vp.project_point3(moon + offset);
+            assert!(
+                ndc.x.abs() <= 0.92 && ndc.y.abs() <= 0.92,
+                "moon point {:?} clipped: ndc=({:.3}, {:.3})",
+                moon + offset,
+                ndc.x,
+                ndc.y
+            );
+        }
+    }
+}
+
+#[test]
+fn panel_flip_transition_starts_settled_folds_at_midpoint_and_clamps_invalid_dt() {
+    let mut flip = PanelFlipTransition::new("departures");
+    assert_approx(flip.progress(), 1.0, 1e-6);
+    assert!(!flip.is_animating());
+    assert_approx(flip.horizontal_scale(), 1.0, 1e-6);
+    assert_approx(flip.shade_factor(), 1.0, 1e-6);
+
+    flip.update("departures", 0.1);
+    assert!(!flip.is_animating());
+    assert_approx(flip.progress(), 1.0, 1e-6);
+
+    flip.update("weather", 0.016);
+    assert!(flip.is_animating());
+    assert_approx(flip.progress(), 0.0, 1e-6);
+    assert_approx(flip.horizontal_scale(), 1.0, 1e-6);
+    assert_approx(flip.shade_factor(), 1.0, 1e-6);
+
+    flip.update("weather", -0.5);
+    assert_approx(flip.progress(), 0.0, 1e-6);
+    flip.update("weather", f32::NAN);
+    assert_approx(flip.progress(), 0.0, 1e-6);
+    flip.update("weather", f32::INFINITY);
+    assert_approx(flip.progress(), 0.0, 1e-6);
+
+    flip.update("weather", PANEL_FLIP_DURATION_SECONDS * 0.5);
+    assert!(flip.is_animating());
+    assert_approx(flip.progress(), 0.5, 1e-4);
+    assert_approx(flip.horizontal_scale(), 0.08, 1e-4);
+    assert_approx(flip.shade_factor(), 0.65 + 0.35 * 0.08, 1e-4);
+
+    flip.update("weather", PANEL_FLIP_DURATION_SECONDS * 0.5);
+    assert!(!flip.is_animating());
+    assert_approx(flip.progress(), 1.0, 1e-6);
+    assert_approx(flip.horizontal_scale(), 1.0, 1e-6);
+    assert_approx(flip.shade_factor(), 1.0, 1e-6);
 }

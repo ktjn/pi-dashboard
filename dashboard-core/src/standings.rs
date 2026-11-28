@@ -545,6 +545,20 @@ impl StandingsRotation {
         let index = slot.rem_euclid(len as i64) as usize;
         &self.competition_ids[index]
     }
+
+    pub fn rotation_progress(&self, now: time::OffsetDateTime) -> f32 {
+        if self.competition_ids.len() <= 1 || self.interval_seconds == 0 {
+            return 0.0;
+        }
+        let interval_nanos = i128::from(self.interval_seconds) * 1_000_000_000;
+        let elapsed_nanos = now.unix_timestamp_nanos().rem_euclid(interval_nanos);
+        let progress = (elapsed_nanos as f64 / interval_nanos as f64) as f32;
+        if progress >= 1.0 {
+            0.0
+        } else {
+            progress.max(0.0)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -559,6 +573,37 @@ mod tests {
             rotation.active_competition(time::OffsetDateTime::UNIX_EPOCH),
             "allsvenskan"
         );
+    }
+
+    #[test]
+    fn rotation_progress_tracks_subsecond_elapsed_window_in_unit_half_open_range() {
+        let multi =
+            StandingsRotation::new(vec!["allsvenskan".to_string(), "serie-a".to_string()], 15);
+        let single = StandingsRotation::new(vec!["allsvenskan".to_string()], 15);
+        let zero_interval =
+            StandingsRotation::new(vec!["allsvenskan".to_string(), "serie-a".to_string()], 0);
+        let empty = StandingsRotation::new(Vec::new(), 15);
+
+        let base = time::OffsetDateTime::UNIX_EPOCH + Duration::seconds(1_782_037_800);
+        assert_eq!(single.rotation_progress(base + Duration::seconds(5)), 0.0);
+        assert_eq!(
+            zero_interval.rotation_progress(base + Duration::seconds(5)),
+            0.0
+        );
+        assert_eq!(empty.rotation_progress(base + Duration::seconds(5)), 0.0);
+
+        assert!((multi.rotation_progress(base) - 0.0).abs() < 1e-6);
+        assert!((multi.rotation_progress(base + Duration::seconds(3)) - 0.2).abs() < 1e-6);
+        assert!((multi.rotation_progress(base + Duration::milliseconds(7_500)) - 0.5).abs() < 1e-6);
+        assert!((multi.rotation_progress(base + Duration::seconds(12)) - 0.8).abs() < 1e-6);
+        assert!((multi.rotation_progress(base + Duration::seconds(15)) - 0.0).abs() < 1e-6);
+
+        let just_before_wrap =
+            multi.rotation_progress(base + Duration::seconds(15) - Duration::nanoseconds(1));
+        assert!((0.0..1.0).contains(&just_before_wrap));
+
+        let before_epoch = time::OffsetDateTime::UNIX_EPOCH - Duration::seconds(5);
+        assert!((multi.rotation_progress(before_epoch) - (10.0 / 15.0)).abs() < 1e-6);
     }
 
     #[test]

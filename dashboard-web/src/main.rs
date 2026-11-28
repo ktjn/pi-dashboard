@@ -3,14 +3,15 @@ use dashboard_core::clock::local_clock;
 use dashboard_core::daylight::daylight_window;
 use dashboard_core::departures::{
     DEPARTURES_STALE_AFTER, DeparturesBoard, DeparturesPanelState, DeparturesSource,
-    DeviationsSource, FixtureDeparturesSource, FixtureDeviationsSource, RawDeparture,
+    DeviationsSource, FixtureDeparturesSource, FixtureDeviationsSource, RawDeparture, RawDeviation,
 };
 use dashboard_core::render::{
-    StationLayoutInput, compute_dashboard_layout, hit_test, render_calendar_availability_note,
-    render_clock_weather_header, render_daylight_strip_at, render_departures_panel_with_header,
-    render_screensaver_view, render_standings_panel, weather_precip_probability,
+    StandingsRenderContext, StationHeaderMeta, StationLayoutInput, compute_dashboard_layout,
+    hit_test, render_calendar_availability_note, render_clock_weather_header,
+    render_daylight_strip_at, render_departures_panel_rich, render_screensaver_view_rich,
+    render_standings_panel_rich, weather_precip_probability,
 };
-use dashboard_core::scene3d::{SplitFlapBoard, compute_solar_scene};
+use dashboard_core::scene3d::{PanelFlipTransition, SplitFlapBoard, compute_solar_scene};
 use dashboard_core::schedule::{DisplayState, reconcile};
 use dashboard_core::screensaver::{
     CalendarEvent, CalendarPollState, FixtureCalendarSource, poll_calendar,
@@ -90,35 +91,52 @@ fn resolve_competition_index(
 }
 
 fn fixture_duvbo_departures(now: time::OffsetDateTime) -> Vec<RawDeparture> {
-    vec![
-        RawDeparture {
-            destination: "Kungsträdgården".to_string(),
-            direction: Some("Kungsträdgården".to_string()),
-            transport_mode: TransitMode::Metro,
-            line_designation: "10".to_string(),
-            scheduled: now + Duration::minutes(14),
-            expected: Some(now + Duration::minutes(14)),
-        },
-        RawDeparture {
-            destination: "Hjulsta".to_string(),
-            direction: Some("Hjulsta".to_string()),
-            transport_mode: TransitMode::Metro,
-            line_designation: "10".to_string(),
-            scheduled: now + Duration::minutes(2),
-            expected: Some(now + Duration::minutes(2)),
-        },
-    ]
+    let inbound = [10, 14, 22, 30].into_iter().map(|offset_min| RawDeparture {
+        destination: "Kungsträdgården".to_string(),
+        direction: Some("Kungsträdgården".to_string()),
+        transport_mode: TransitMode::Metro,
+        line_designation: "10".to_string(),
+        scheduled: now + Duration::minutes(offset_min),
+        expected: Some(now + Duration::minutes(offset_min)),
+    });
+    let outbound = std::iter::once(RawDeparture {
+        destination: "Hjulsta".to_string(),
+        direction: Some("Hjulsta".to_string()),
+        transport_mode: TransitMode::Metro,
+        line_designation: "10".to_string(),
+        scheduled: now + Duration::minutes(2),
+        expected: Some(now + Duration::minutes(2)),
+    });
+    inbound.chain(outbound).collect()
+}
+
+fn fixture_duvbo_deviations(now: time::OffsetDateTime) -> Vec<RawDeviation> {
+    vec![RawDeviation {
+        deviation_case_id: 932401,
+        header: "Signalfel vid Västra skogen — räkna med 5–10 min förseningar.".to_string(),
+        importance_level: 5,
+        publish_from: Some(now - Duration::minutes(15)),
+        publish_upto: Some(now + Duration::hours(2)),
+        affected_modes: vec![TransitMode::Metro],
+    }]
 }
 
 fn fixture_sundbyberg_departures(now: time::OffsetDateTime) -> Vec<RawDeparture> {
-    vec![RawDeparture {
-        destination: "Stockholm Central".to_string(),
-        direction: Some("Stockholm Central".to_string()),
+    [
+        ("40", "Stockholm Central", 18),
+        ("41", "Stockholm Central", 24),
+        ("40", "Nynäshamn", 33),
+    ]
+    .into_iter()
+    .map(|(line, destination, offset_min)| RawDeparture {
+        destination: destination.to_string(),
+        direction: Some(destination.to_string()),
         transport_mode: TransitMode::Train,
-        line_designation: "40".to_string(),
-        scheduled: now + Duration::minutes(18),
-        expected: Some(now + Duration::minutes(18)),
-    }]
+        line_designation: line.to_string(),
+        scheduled: now + Duration::minutes(offset_min),
+        expected: Some(now + Duration::minutes(offset_min)),
+    })
+    .collect()
 }
 
 fn refresh_fixture_departures_for_site(
@@ -134,8 +152,12 @@ fn refresh_fixture_departures_for_site(
     };
     let mut departures_responses = HashMap::new();
     departures_responses.insert(site_id, Ok(departures));
+    let mut deviations_responses = HashMap::new();
+    if site_id == DUVBO_SITE_ID {
+        deviations_responses.insert(site_id, Ok(fixture_duvbo_deviations(generation_time)));
+    }
     let mut departures_source = FixtureDeparturesSource::new(departures_responses);
-    let mut deviations_source = FixtureDeviationsSource::new(HashMap::new());
+    let mut deviations_source = FixtureDeviationsSource::new(deviations_responses);
 
     if let Ok(departures) = departures_source.fetch_departures(site_id) {
         board.record_departures_success(site_id, departures, fetched_at);
@@ -172,49 +194,55 @@ fn refresh_fixture_weather(
 }
 
 fn fixture_allsvenskan_table() -> Vec<StandingsRow> {
-    vec![
-        StandingsRow {
-            competition: "Allsvenskan".to_string(),
-            season: "2026".to_string(),
-            position: 1,
-            team: "Malmö FF".to_string(),
-            played: 30,
-            goal_difference: 20,
-            points: 55,
-        },
-        StandingsRow {
-            competition: "Allsvenskan".to_string(),
-            season: "2026".to_string(),
-            position: 2,
-            team: "Djurgården".to_string(),
-            played: 30,
-            goal_difference: 17,
-            points: 55,
-        },
+    [
+        (1, "Malmö FF", 30, 26, 62),
+        (2, "Djurgården", 30, 19, 57),
+        (3, "Hammarby", 30, 15, 54),
+        (4, "AIK", 30, 11, 50),
+        (5, "Häcken", 30, 4, 43),
+        (6, "Elfsborg", 30, 0, 40),
+        (7, "Brommapojkarna", 30, -9, 29),
+        (8, "Halmstad", 30, -16, 24),
     ]
+    .into_iter()
+    .map(
+        |(position, team, played, goal_difference, points)| StandingsRow {
+            competition: "Allsvenskan".to_string(),
+            season: "2026".to_string(),
+            position,
+            team: team.to_string(),
+            played,
+            goal_difference,
+            points,
+        },
+    )
+    .collect()
 }
 
 fn fixture_serie_a_table() -> Vec<StandingsRow> {
-    vec![
-        StandingsRow {
-            competition: "Serie A".to_string(),
-            season: "2025/2026".to_string(),
-            position: 1,
-            team: "Internazionale".to_string(),
-            played: 13,
-            goal_difference: 18,
-            points: 32,
-        },
-        StandingsRow {
-            competition: "Serie A".to_string(),
-            season: "2025/2026".to_string(),
-            position: 2,
-            team: "Napoli".to_string(),
-            played: 13,
-            goal_difference: 13,
-            points: 30,
-        },
+    [
+        (1, "Internazionale", 13, 18, 32),
+        (2, "Napoli", 13, 13, 30),
+        (3, "Atalanta", 13, 14, 28),
+        (4, "Juventus", 13, 10, 26),
+        (5, "Lazio", 13, 6, 24),
+        (6, "Milan", 13, 0, 20),
+        (7, "Como", 13, -7, 11),
+        (8, "Venezia", 13, -12, 8),
     ]
+    .into_iter()
+    .map(
+        |(position, team, played, goal_difference, points)| StandingsRow {
+            competition: "Serie A".to_string(),
+            season: "2025/2026".to_string(),
+            position,
+            team: team.to_string(),
+            played,
+            goal_difference,
+            points,
+        },
+    )
+    .collect()
 }
 
 fn refresh_fixture_standings_for_competition(
@@ -376,6 +404,7 @@ async fn main() {
     let mut daylight_date: Option<Date> = None;
     let mut daylight = None;
     let mut split_flap = SplitFlapBoard::new("00:00:00");
+    let mut standings_flip = PanelFlipTransition::new(ALLSVENSKAN_ID);
 
     let cycle_length_seconds = DEMO_CYCLE_LENGTH.whole_seconds();
 
@@ -454,10 +483,11 @@ async fn main() {
 
         macroquad::window::clear_background(palette::INK);
 
+        let frame_dt = macroquad::time::get_frame_time();
         let clock = local_clock(STOCKHOLM_TZ, now_utc).expect("time zone must resolve");
         split_flap.update(
             &format!("{:02}:{:02}:{:02}", clock.hour, clock.minute, clock.second),
-            macroquad::time::get_frame_time(),
+            frame_dt,
         );
         let calendar_availability = calendar_poll_state.availability(now_utc);
 
@@ -477,7 +507,7 @@ async fn main() {
                 taps.clear();
             }
             if touch_state.mode != TouchMode::ScreensaverDismissed {
-                render_screensaver_view(&split_flap, &calendar_availability, &theme);
+                render_screensaver_view_rich(&clock, &split_flap, &calendar_availability, &theme);
                 macroquad::window::next_frame().await;
                 continue;
             }
@@ -588,9 +618,13 @@ async fn main() {
             .zip(station_states.iter())
             .zip(layout.station_tops.iter().copied())
         {
-            let _ = render_departures_panel_with_header(
-                &station.name,
-                station.site_id,
+            let _ = render_departures_panel_rich(
+                StationHeaderMeta {
+                    name: &station.name,
+                    site_id: station.site_id,
+                    mode: station.mode,
+                    walk_time_min: station.walk_time_min,
+                },
                 state,
                 top,
                 touch_state.expanded_departure.as_deref(),
@@ -615,8 +649,17 @@ async fn main() {
             );
         }
 
-        render_standings_panel(
-            active_competition_id,
+        standings_flip.update(active_competition_id, frame_dt);
+        let rotation_progress = standings_rotation.rotation_progress(now_utc);
+        render_standings_panel_rich(
+            StandingsRenderContext {
+                competition_label: active_competition_id,
+                panel_count: competition_ids.len(),
+                active_index: active_competition_index,
+                is_paused: touch_state.football_index.is_some(),
+                rotation_progress,
+                flip: Some(&standings_flip),
+            },
             &standings_state,
             layout.standings_top,
             &theme,
@@ -654,18 +697,26 @@ mod tests {
         let now = datetime!(2026-11-24 20:00:00 UTC);
         let departures = fixture_duvbo_departures(now);
 
-        assert_eq!(departures.len(), 2);
-        assert_eq!(departures[0].destination, "Kungsträdgården");
-        assert_eq!(departures[0].transport_mode, TransitMode::Metro);
-        assert_eq!(departures[0].line_designation, "10");
-        assert_eq!(departures[0].scheduled, now + Duration::minutes(14));
-        assert_eq!(departures[0].expected, Some(now + Duration::minutes(14)));
+        assert_eq!(departures.len(), 5);
+        for (idx, offset_min) in [(0, 10), (1, 14), (2, 22), (3, 30)] {
+            assert_eq!(departures[idx].destination, "Kungsträdgården");
+            assert_eq!(departures[idx].transport_mode, TransitMode::Metro);
+            assert_eq!(departures[idx].line_designation, "10");
+            assert_eq!(
+                departures[idx].scheduled,
+                now + Duration::minutes(offset_min)
+            );
+            assert_eq!(
+                departures[idx].expected,
+                Some(now + Duration::minutes(offset_min))
+            );
+        }
 
-        assert_eq!(departures[1].destination, "Hjulsta");
-        assert_eq!(departures[1].transport_mode, TransitMode::Metro);
-        assert_eq!(departures[1].line_designation, "10");
-        assert_eq!(departures[1].scheduled, now + Duration::minutes(2));
-        assert_eq!(departures[1].expected, Some(now + Duration::minutes(2)));
+        assert_eq!(departures[4].destination, "Hjulsta");
+        assert_eq!(departures[4].transport_mode, TransitMode::Metro);
+        assert_eq!(departures[4].line_designation, "10");
+        assert_eq!(departures[4].scheduled, now + Duration::minutes(2));
+        assert_eq!(departures[4].expected, Some(now + Duration::minutes(2)));
     }
 
     #[test]
@@ -673,12 +724,110 @@ mod tests {
         let now = datetime!(2026-11-24 20:00:00 UTC);
         let departures = fixture_sundbyberg_departures(now);
 
-        assert_eq!(departures.len(), 1);
-        assert_eq!(departures[0].destination, "Stockholm Central");
-        assert_eq!(departures[0].transport_mode, TransitMode::Train);
-        assert_eq!(departures[0].line_designation, "40");
-        assert_eq!(departures[0].scheduled, now + Duration::minutes(18));
-        assert_eq!(departures[0].expected, Some(now + Duration::minutes(18)));
+        assert_eq!(departures.len(), 3);
+        let expected = [
+            ("40", "Stockholm Central", 18),
+            ("41", "Stockholm Central", 24),
+            ("40", "Nynäshamn", 33),
+        ];
+        for (idx, (line, destination, offset_min)) in expected.into_iter().enumerate() {
+            assert_eq!(departures[idx].line_designation, line);
+            assert_eq!(departures[idx].destination, destination);
+            assert_eq!(departures[idx].transport_mode, TransitMode::Train);
+            assert_eq!(
+                departures[idx].scheduled,
+                now + Duration::minutes(offset_min)
+            );
+            assert_eq!(
+                departures[idx].expected,
+                Some(now + Duration::minutes(offset_min))
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_fixture_departures_attaches_active_metro_disruption_to_duvbo_only() {
+        let now = datetime!(2026-11-24 20:00:00 UTC);
+        let mut board = DeparturesBoard::new();
+        refresh_fixture_departures(&mut board, now, now);
+
+        let duvbo = Station {
+            site_id: DUVBO_SITE_ID,
+            name: "Duvbo".to_string(),
+            mode: TransitMode::Metro,
+            walk_time_min: 10,
+            direction: "stockholm".to_string(),
+        };
+        let sundbyberg = Station {
+            site_id: SUNDBYBERG_SITE_ID,
+            name: "Sundbyberg".to_string(),
+            mode: TransitMode::Train,
+            walk_time_min: 15,
+            direction: "stockholm".to_string(),
+        };
+
+        let DeparturesPanelState::Fresh(duvbo_departures) = board.station_state(&duvbo, now) else {
+            panic!("expected fresh Duvbo departures");
+        };
+        assert_eq!(duvbo_departures.len(), 4);
+        assert_eq!(duvbo_departures[0].countdown_min, 0);
+        for departure in &duvbo_departures {
+            assert!(
+                departure
+                    .disruption
+                    .as_deref()
+                    .is_some_and(|text| text.contains("Signalfel vid Västra skogen"))
+            );
+        }
+
+        let DeparturesPanelState::Fresh(sundbyberg_departures) =
+            board.station_state(&sundbyberg, now)
+        else {
+            panic!("expected fresh Sundbyberg departures");
+        };
+        assert_eq!(sundbyberg_departures.len(), 3);
+        assert!(
+            sundbyberg_departures
+                .iter()
+                .all(|departure| departure.disruption.is_none())
+        );
+    }
+
+    #[test]
+    fn fixture_standings_tables_provide_eight_teams_covering_all_zones() {
+        let allsvenskan = fixture_allsvenskan_table();
+        let expected_allsvenskan = [
+            "Malmö FF",
+            "Djurgården",
+            "Hammarby",
+            "AIK",
+            "Häcken",
+            "Elfsborg",
+            "Brommapojkarna",
+            "Halmstad",
+        ];
+        assert_eq!(allsvenskan.len(), 8);
+        for (idx, name) in expected_allsvenskan.into_iter().enumerate() {
+            assert_eq!(allsvenskan[idx].position, (idx + 1) as u32);
+            assert_eq!(allsvenskan[idx].team, name);
+        }
+
+        let serie_a = fixture_serie_a_table();
+        let expected_serie_a = [
+            "Internazionale",
+            "Napoli",
+            "Atalanta",
+            "Juventus",
+            "Lazio",
+            "Milan",
+            "Como",
+            "Venezia",
+        ];
+        assert_eq!(serie_a.len(), 8);
+        for (idx, name) in expected_serie_a.into_iter().enumerate() {
+            assert_eq!(serie_a[idx].position, (idx + 1) as u32);
+            assert_eq!(serie_a[idx].team, name);
+        }
     }
 
     #[test]

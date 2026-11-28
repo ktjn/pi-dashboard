@@ -1116,6 +1116,15 @@ mod tests {
         let html = include_str!("../web/control.html");
         assert!(!html.contains("innerHTML"));
         assert!(html.contains("clearInterval"));
+        assert!(html.contains("formatUptime"));
+        assert!(html.contains("panel_freshness"));
+        assert!(html.contains("Enter"));
+        assert!(html.contains("Object.hasOwn"));
+        assert!(html.contains("Number.isFinite"));
+        assert!(html.contains("sessionGeneration"));
+        assert!(html.contains("isRefreshing"));
+        assert!(html.contains("lastFreshnessKey"));
+        assert!(html.contains("renderStatusReport"));
     }
 
     #[tokio::test]
